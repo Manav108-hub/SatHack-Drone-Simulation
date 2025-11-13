@@ -8,36 +8,34 @@ class Kamikaze:
         self.client.confirmConnection()
         
     def run(self):
-        print("\n💤 KAMIKAZE STARTING...")
+        swarm.log("KAMIKAZE", "Initializing", "INFO")
         
         self.client.enableApiControl(True, "Kamikaze1")
         self.client.armDisarm(True, "Kamikaze1")
         self.client.takeoffAsync(vehicle_name="Kamikaze1").join()
         
-        print("💤 KAMIKAZE ON STANDBY\n")
+        swarm.log("KAMIKAZE", "Standby", "INFO")
         
         while not swarm.kamikaze_deployed:
             time.sleep(0.5)
         
         target = swarm.kamikaze_target
         
-        print(f"\n💥 KAMIKAZE STRIKE AUTHORIZED!")
-        print(f"🎯 Target: ({target[0]:.1f}, {target[1]:.1f})")
-        print("🚀 LAUNCHING...")
+        swarm.log("KAMIKAZE", f"STRIKE AUTHORIZED!", "CRITICAL")
+        swarm.log("KAMIKAZE", f"Target: ({target[0]:.1f}, {target[1]:.1f})", "CRITICAL")
         
-        # Fast approach
         self.client.moveToPositionAsync(target[0], target[1], -3, velocity=25, vehicle_name="Kamikaze1").join()
         
-        # EXPLOSION SEQUENCE
         print("\n" + "="*60)
         for i in range(3):
             print("💥 " * 20)
             time.sleep(0.2)
         print("="*60)
-        print("🔥 EXPLOSION! TARGET DESTROYED! 🔥")
+        print("🔥 TARGET DESTROYED! 🔥")
         print("="*60 + "\n")
         
-        # Crash and disable
+        swarm.log("KAMIKAZE", "TARGET ELIMINATED", "CRITICAL")
+        
         self.client.simSetVehiclePose(
             airsim.Pose(airsim.Vector3r(target[0], target[1], 0), airsim.to_quaternion(0, 0, 0)),
             True, "Kamikaze1"

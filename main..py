@@ -2,11 +2,6 @@ from threading import Thread
 import time
 import sys
 
-import queen
-import warriors
-import kamikaze
-
-
 print("\n" + "="*70)
 print("🚁 AUTONOMOUS DRONE SWARM - HIVE INTELLIGENCE")
 print("="*70)
@@ -24,8 +19,11 @@ print("2...")
 time.sleep(1)
 print("1...\n")
 
-# Force flush
 sys.stdout.flush()
+
+import queen
+import warriors
+import kamikaze
 
 def run_with_catch(func, name):
     try:
@@ -43,12 +41,11 @@ t2.start()
 time.sleep(3)
 t3.start()
 
-# Keep main alive
 try:
     while t1.is_alive() or t2.is_alive() or t3.is_alive():
         time.sleep(1)
 except KeyboardInterrupt:
-    print("\n\n⚠️  Interrupted by user")
+    print("\n\n⚠️  Interrupted")
 
 print("\n" + "="*70)
 print("✅ MISSION COMPLETE")
