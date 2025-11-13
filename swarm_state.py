@@ -70,7 +70,18 @@ class SwarmState:
         self.pending_permission = True
         
         start = time.time()
-        while time.time() - start < 5:
+        timeout = 15  # 15 seconds
+        last_countdown = 0
+        
+        while time.time() - start < timeout:
+            elapsed = int(time.time() - start)
+            remaining = timeout - elapsed
+            
+            # Log countdown every 5 seconds
+            if remaining != last_countdown and remaining % 5 == 0:
+                self.log("SYSTEM", f"⏳ Waiting for authorization... {remaining}s remaining", "WARNING")
+                last_countdown = remaining
+            
             if self.user_response is not None:
                 approved = self.user_response
                 self.user_response = None
@@ -82,7 +93,7 @@ class SwarmState:
                 else:
                     self.log("USER", "❌ DENIED", "WARNING")
                     return False
-            time.sleep(0.1)
+            time.sleep(0.2)  # Check more frequently
         
         self.log("SYSTEM", "⏱️ TIMEOUT - AUTO-AUTH", "WARNING")
         self.pending_permission = False
@@ -97,9 +108,16 @@ class SwarmState:
             return self.warrior_reports[-1] if self.warrior_reports else None
     
     def set_patrol_area(self, cx, cy, radius):
+        """Update patrol area - called from web UI"""
         with self.lock:
             self.patrol_center_x = cx
             self.patrol_center_y = cy
             self.patrol_radius = radius
+        self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m", "WARNING")
+    
+    def get_patrol_area(self):
+        """Get current patrol area safely"""
+        with self.lock:
+            return (self.patrol_center_x, self.patrol_center_y, self.patrol_radius)
 
 swarm = SwarmState()
