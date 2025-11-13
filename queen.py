@@ -6,6 +6,7 @@ from swarm_state import swarm
 
 class Queen:
     def __init__(self):
+        self.start_time = time.time()
         self.client = airsim.MultirotorClient()
         self.client.confirmConnection()
         print("📥 Loading AI model...")
@@ -24,7 +25,7 @@ class Queen:
             return img1d.reshape(responses[0].height, responses[0].width, 3)
         return None
     
-    def detect_threats(self):
+    # def detect_threats(self):
         img = self.get_camera()
         if img is None:
             return None
@@ -49,6 +50,18 @@ class Queen:
                 }
         return None
     
+
+    def detect_threats(self):
+    # Force threat after 15 seconds
+        if time.time() - self.start_time > 60:
+            return {
+                'class': 'person',
+                'confidence': 0.92,
+                'world_pos': (20, 20),
+                'timestamp': time.time()
+            }
+        return None
+
     def run(self):
         print("\n👑 QUEEN STARTING...")
         

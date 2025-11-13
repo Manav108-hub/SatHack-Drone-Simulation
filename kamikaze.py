@@ -14,9 +14,6 @@ class Kamikaze:
         self.client.armDisarm(True, "Kamikaze1")
         self.client.takeoffAsync(vehicle_name="Kamikaze1").join()
         
-        print("📍 Moving to standby...")
-        self.client.moveToPositionAsync(-20, -20, -10, 3, vehicle_name="Kamikaze1").join()
-        
         print("💤 KAMIKAZE ON STANDBY\n")
         
         while not swarm.kamikaze_deployed:
@@ -26,17 +23,27 @@ class Kamikaze:
         
         print(f"\n💥 KAMIKAZE STRIKE AUTHORIZED!")
         print(f"🎯 Target: ({target[0]:.1f}, {target[1]:.1f})")
+        print("🚀 LAUNCHING...")
         
-        self.client.moveToPositionAsync(
-            target[0], target[1], -5, 
-            velocity=20, 
-            vehicle_name="Kamikaze1"
-        ).join()
+        # Fast approach
+        self.client.moveToPositionAsync(target[0], target[1], -3, velocity=25, vehicle_name="Kamikaze1").join()
         
-        print("💥💥💥 TARGET ELIMINATED!")
+        # EXPLOSION SEQUENCE
+        print("\n" + "="*60)
+        for i in range(3):
+            print("💥 " * 20)
+            time.sleep(0.2)
+        print("="*60)
+        print("🔥 EXPLOSION! TARGET DESTROYED! 🔥")
+        print("="*60 + "\n")
+        
+        # Crash and disable
+        self.client.simSetVehiclePose(
+            airsim.Pose(airsim.Vector3r(target[0], target[1], 0), airsim.to_quaternion(0, 0, 0)),
+            True, "Kamikaze1"
+        )
         
         time.sleep(1)
-        self.client.landAsync(vehicle_name="Kamikaze1").join()
 
 def run():
     kamikaze = Kamikaze()
