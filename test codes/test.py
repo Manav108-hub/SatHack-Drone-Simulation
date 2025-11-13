@@ -1,47 +1,33 @@
-import sys
 import airsim
 import time
 
-print("=" * 60)
-print("🚁 SIMPLE CONNECTION TEST")
-print("=" * 60)
+client = airsim.MultirotorClient()
+client.confirmConnection()
+print("✅ Connected!")
 
-try:
-    print("\nConnecting...")
-    
-    # Use different connection method
-    client = airsim.MultirotorClient()
-    client.confirmConnection()
-    
-    print("✅ CONNECTED!")
-    print(f"AirSim Version: {client.getServerVersion()}")
-    
-    # Enable and arm
-    client.enableApiControl(True, "Queen")
-    client.armDisarm(True, "Queen")
-    print("✅ Queen armed!")
-    
-    # Takeoff
-    print("\nTaking off...")
-    client.takeoffAsync(vehicle_name="Queen").join()
-    print("✅ Airborne!")
-    
-    time.sleep(2)
-    
-    # Get state
-    state = client.getMultirotorState(vehicle_name="Queen")
-    print(f"✅ Position: {state.kinematics_estimated.position}")
-    
-    # Land
-    print("\nLanding...")
-    client.landAsync(vehicle_name="Queen").join()
-    print("✅ Landed!")
-    
-    print("\n" + "=" * 60)
-    print("✅ SUCCESS! READY FOR AI PHASE!")
-    print("=" * 60)
-    
-except Exception as e:
-    print(f"\n❌ Error: {e}")
-    import traceback
-    traceback.print_exc()
+# Enable all
+for drone in ["Queen", "Warrior1", "Kamikaze1"]:
+    client.enableApiControl(True, drone)
+    client.armDisarm(True, drone)
+
+# Takeoff
+client.takeoffAsync(vehicle_name="Queen")
+client.takeoffAsync(vehicle_name="Warrior1")
+client.takeoffAsync(vehicle_name="Kamikaze1").join()
+
+print("✅ All airborne!")
+
+# Formation
+client.moveToPositionAsync(0, 0, -20, 5, vehicle_name="Queen")
+client.moveToPositionAsync(30, 0, -20, 5, vehicle_name="Warrior1")
+client.moveToPositionAsync(-30, 0, -20, 5, vehicle_name="Kamikaze1").join()
+
+print("✅ Formation complete! Hovering 10 seconds...")
+time.sleep(10)
+
+# Land
+client.landAsync(vehicle_name="Queen")
+client.landAsync(vehicle_name="Warrior1")
+client.landAsync(vehicle_name="Kamikaze1").join()
+
+print("✅ Test complete!")
