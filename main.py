@@ -3,10 +3,9 @@ import os
 import sys
 import time
 import logging
-from threading import Thread
 import traceback
+from threading import Thread
 
-# Setup a small logger for main
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 logger = logging.getLogger("MAIN")
@@ -15,8 +14,6 @@ ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
 
-# Import the modules (they should exist in the same folder)
-# datacenter defines run_web(host, port)
 import datacenter
 import queen
 import warriors
@@ -57,7 +54,6 @@ def main():
     print("1...\n")
     sys.stdout.flush()
 
-    # Start datacenter web UI in a daemon thread (so it shares the same memory & swarm instance)
     try:
         web_thread = Thread(target=lambda: datacenter.run_web(host='0.0.0.0', port=5000),
                             daemon=True, name="Datacenter-Web")
@@ -67,10 +63,8 @@ def main():
         logger.error(f"Failed to start datacenter thread: {e}")
         traceback.print_exc()
 
-    # Small delay so web UI begins before drones (helps when UI polls immediately)
     time.sleep(1.2)
 
-    # Start Queen, Warrior, Kamikaze as daemon threads using the run() entrypoints
     t1 = start_thread(queen.run, "Queen", daemon=True)
     time.sleep(2)
     t2 = start_thread(warriors.run, "Warrior", daemon=True)
@@ -78,7 +72,6 @@ def main():
     t3 = start_thread(kamikaze.run, "Kamikaze", daemon=True)
 
     try:
-        # Keep main thread alive while any child threads are running
         while True:
             alive = any(t.is_alive() for t in [web_thread, t1, t2, t3] if t is not None)
             if not alive:
@@ -94,7 +87,6 @@ def main():
         print("\n" + "="*70)
         print("✅ SHUTTING DOWN")
         print("="*70 + "\n")
-        # Threads are daemon — process will exit cleanly
 
 if __name__ == '__main__':
     main()

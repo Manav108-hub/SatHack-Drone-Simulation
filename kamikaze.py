@@ -1,48 +1,64 @@
-import airsim
+# kamikaze.py
 import time
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+import airsim
 from swarm_state import swarm
 
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+logger = logging.getLogger("KAMIKAZE")
+logger.setLevel(logging.DEBUG)
+fh = RotatingFileHandler(os.path.join(LOG_DIR, "kamikaze.log"), maxBytes=2_000_000, backupCount=3)
+fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
+logger.addHandler(fh)
+ch = logging.StreamHandler()
+ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
+logger.addHandler(ch)
+logger.propagate = False
+
 class Kamikaze:
-    def __init__(self):
-        self.client = airsim.MultirotorClient()
-        self.client.confirmConnection()
-        
+    def __init__(self, vehicle_name="Kamikaze1"):
+        self.vehicle_name = vehicle_name
+        try:
+            self.client = airsim.MultirotorClient()
+            self.client.confirmConnection()
+            logger.info("Kamikaze: connected to AirSim")
+        except Exception as e:
+            logger.warning("Kamikaze AirSim connection failed: %s", e)
+            self.client = None
+
     def run(self):
         swarm.log("KAMIKAZE", "Initializing", "INFO")
-        
-        self.client.enableApiControl(True, "Kamikaze1")
-        self.client.armDisarm(True, "Kamikaze1")
-        self.client.takeoffAsync(vehicle_name="Kamikaze1").join()
-        
-        swarm.log("KAMIKAZE", "Standby", "INFO")
-        
-        while not swarm.kamikaze_deployed:
-            time.sleep(0.5)
-        
-        target = swarm.kamikaze_target
-        
-        swarm.log("KAMIKAZE", f"STRIKE AUTHORIZED!", "CRITICAL")
-        swarm.log("KAMIKAZE", f"Target: ({target[0]:.1f}, {target[1]:.1f})", "CRITICAL")
-        
-        self.client.moveToPositionAsync(target[0], target[1], -3, velocity=25, vehicle_name="Kamikaze1").join()
-        
-        print("\n" + "="*60)
-        for i in range(3):
-            print("💥 " * 20)
-            time.sleep(0.2)
-        print("="*60)
-        print("🔥 TARGET DESTROYED! 🔥")
-        print("="*60 + "\n")
-        
-        swarm.log("KAMIKAZE", "TARGET ELIMINATED", "CRITICAL")
-        
-        self.client.simSetVehiclePose(
-            airsim.Pose(airsim.Vector3r(target[0], target[1], 0), airsim.to_quaternion(0, 0, 0)),
-            True, "Kamikaze1"
-        )
-        
-        time.sleep(1)
+        if self.client:
+            try:
+                self.client.enableApiControl(True, self.vehicle_name)
+                self.client.armDisarm(True, self.vehicle_name)
+                self.client.takeoffAsync(vehicle_name=self.vehicle_name).join(timeout=8)
+            except Exception:
+                pass
+        else:
+            swarm.log("KAMIKAZE", "No AirSim client (standby)", "WARNING")
+
+        while True:
+            if swarm.kamikaze_deployed and swarm.kamikaze_target:
+                target = swarm.kamikaze_target
+                swarm.log("KAMIKAZE", f"🔥 KAMIKAZE STRIKE -> {target}", "CRITICAL")
+                if self.client:
+                    try:
+                        tx, ty = float(target[0]), float(target[1])
+                        self.client.moveToPositionAsync(tx, ty, -10, 10, vehicle_name=self.vehicle_name).join(30)
+                        swarm.log("KAMIKAZE", f"Reached strike target ({tx:.1f},{ty:.1f})", "CRITICAL")
+                        # After strike, hover/land
+                        self.client.hoverAsync(vehicle_name=self.vehicle_name).join(5)
+                    except Exception as e:
+                        swarm.log("KAMIKAZE", f"Strike error: {e}", "WARNING")
+                # reset
+                swarm.kamikaze_deployed = False
+                swarm.kamikaze_target = None
+            time.sleep(1)
 
 def run():
-    kamikaze = Kamikaze()
-    kamikaze.run()
+    k = Kamikaze()
+    k.run()

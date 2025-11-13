@@ -26,6 +26,7 @@ logger.addHandler(fh)
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
+logger.propagate = False
 
 app = Flask(__name__)
 
@@ -101,7 +102,6 @@ def gen_stream(drone, feed_style="normal"):
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
             else:
-                # send a tiny blank frame occasionally to keep client alive
                 blank = np.zeros((120, 160, 3), dtype=np.uint8)
                 _, b = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 40])
                 yield (b'--frame\r\n'
@@ -139,7 +139,17 @@ def status():
     try:
         cx, cy, r = swarm.get_patrol_area()
         warrior_status = swarm.get_warrior_status()
-        # Ensure warrior_status has a position and time fields (consistent shape)
+
+        # --- GET QUEEN POSE FOR RELATIVE PATROL ---
+        queen_pose = None
+        try:
+            q_client = get_client("Queen")
+            if q_client:
+                pos = q_client.simGetVehiclePose("Queen").position
+                queen_pose = (pos.x_val, pos.y_val, pos.z_val)
+        except Exception:
+            queen_pose = None
+
         status_data = {
             'threat_level': swarm.threat_level,
             'pending_permission': swarm.pending_permission,
@@ -152,13 +162,18 @@ def status():
                 'center_y': cy,
                 'radius': r
             },
+            'patrol_relative': swarm.patrol_relative_to_queen,
             'last_patrol_update': getattr(swarm, 'last_patrol_update', 0),
-            'last_warrior_update': getattr(swarm, 'last_warrior_update', 0)
+            'last_warrior_update': getattr(swarm, 'last_warrior_update', 0),
+
+            # <<< FIXED LINE >>>
+            'queen_pose': queen_pose
         }
         return jsonify(status_data)
     except Exception as e:
         logger.exception("Status error")
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/approve', methods=['POST'])
 def approve():
@@ -209,9 +224,10 @@ def set_patrol():
         cx = float(data.get('x', 0))
         cy = float(data.get('y', 0))
         radius = float(data.get('radius', 30))
-        swarm.set_patrol_area(cx, cy, radius)
-        logger.info(f"Patrol updated via UI: ({cx}, {cy}) R={radius}")
-        return jsonify({'center_x': cx, 'center_y': cy, 'radius': radius})
+        relative = bool(data.get('relative', False))
+        swarm.set_patrol_area(cx, cy, radius, relative=relative)
+        logger.info(f"Patrol updated via UI: ({cx}, {cy}) R={radius} relative={relative}")
+        return jsonify({'center_x': cx, 'center_y': cy, 'radius': radius, 'relative': relative})
     except Exception as e:
         logger.exception("Set patrol error")
         return jsonify({'error': str(e)}), 500
@@ -220,9 +236,50 @@ def set_patrol():
 def get_patrol():
     try:
         cx, cy, r = swarm.get_patrol_area()
-        return jsonify({'center_x': cx, 'center_y': cy, 'radius': r})
+        return jsonify({'center_x': cx, 'center_y': cy, 'radius': r, 'relative': swarm.patrol_relative_to_queen})
     except Exception as e:
         logger.exception("Get patrol error")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/set_queen_pose', methods=['POST'])
+def set_queen_pose():
+    """Teleport Queen to given pose (x,y,z). Immediate change — useful for testing."""
+    try:
+        data = request.json or {}
+        x = float(data.get('x', 0))
+        y = float(data.get('y', 0))
+        z = float(data.get('z', -20))
+        client = get_client("Queen")
+        if client is None:
+            return jsonify({'error': 'No AirSim client for Queen'}), 500
+        pose = airsim.Pose(airsim.Vector3r(x, y, z), airsim.to_quaternion(0,0,0))
+        client.simSetVehiclePose(pose, True, vehicle_name="Queen")
+        swarm.log("SYSTEM", f"Queen teleported to ({x:.1f}, {y:.1f}, {z:.1f})", "INFO")
+        return jsonify({'status': 'ok', 'x': x, 'y': y, 'z': z})
+    except Exception as e:
+        logger.exception("Set queen pose error")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/move_queen', methods=['POST'])
+def move_queen():
+    """Command Queen to fly smoothly to a target (x,y,z) using moveToPositionAsync."""
+    try:
+        data = request.json or {}
+        x = float(data.get('x', 0))
+        y = float(data.get('y', 0))
+        z = float(data.get('z', -20))
+        speed = float(data.get('speed', 5.0))
+        client = get_client("Queen")
+        if client is None:
+            return jsonify({'error': 'No AirSim client for Queen'}), 500
+        # non-blocking command; return immediately
+        client.enableApiControl(True, "Queen")
+        client.armDisarm(True, "Queen")
+        client.moveToPositionAsync(x, y, z, speed, vehicle_name="Queen")
+        swarm.log("SYSTEM", f"Queen moving to ({x:.1f}, {y:.1f}, {z:.1f}) speed={speed}", "INFO")
+        return jsonify({'status': 'moving', 'x': x, 'y': y, 'z': z, 'speed': speed})
+    except Exception as e:
+        logger.exception("Move queen error")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/favicon.ico')
@@ -230,7 +287,7 @@ def favicon():
     return '', 204
 
 # ----------------------------
-# UI Template (full)
+# UI Template (full) - same as before but with relative toggle and queen controls
 # ----------------------------
 UI_TEMPLATE = r"""
 <!doctype html>
@@ -240,53 +297,35 @@ UI_TEMPLATE = r"""
   <title>🚁 AUTONOMOUS DRONE COMMAND CENTER</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    :root {
-      --bg: #060606;
-      --accent: #00ff66;
-      --warn: #ff6600;
-      --danger: #ff4444;
-      --muted: #888;
-      --panel: #0f0f0f;
-    }
-    html,body { height:100%; margin:0; background:linear-gradient(#040404,#070707); color:var(--accent); font-family: "Consolas","Courier New",monospace; }
-    .header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-bottom:2px solid rgba(0,255,102,0.06); }
-    h1 { margin:0; font-size:1.1rem; color:var(--accent); text-shadow:0 0 8px rgba(0,255,102,0.06); }
-    .stats { display:flex; gap:10px; align-items:center; }
-    .stat { background:rgba(0,0,0,0.4); padding:6px 8px; border:1px solid rgba(0,255,102,0.06); border-radius:6px; font-size:0.9rem; color:var(--accent); }
-    .container { display:grid; grid-template-columns: 1fr 420px; gap:12px; padding:12px; height:calc(100% - 64px); box-sizing:border-box; }
-    .left { display:flex; flex-direction:column; gap:12px; }
-    .feeds { display:flex; gap:8px; }
-    .feed { flex:1; border:2px solid rgba(255,255,255,0.03); border-radius:6px; height:220px; overflow:hidden; background:#000; position:relative; }
-    .feed img { width:100%; height:100%; object-fit:cover; display:block; }
-    .feed-label { position:absolute; top:6px; left:8px; background:rgba(0,0,0,0.6); padding:6px 8px; border-radius:4px; font-size:0.8rem; color:var(--warn); border:1px solid rgba(255,102,0,0.12); }
-    .panel { background:var(--panel); border:2px solid rgba(0,255,102,0.06); padding:10px; border-radius:8px; color:var(--accent); }
-    .mini { display:flex; gap:12px; }
-    .telemetry { width:420px; }
-    .telemetry h3{ margin:0 0 8px 0; color:var(--accent); }
-    .telemetry div{ margin:6px 0; color:#ccefc9; }
-    .btn { display:inline-block; padding:8px 12px; border-radius:6px; border:1px solid rgba(255,255,255,0.06); cursor:pointer; background:rgba(0,0,0,0.3); color:var(--accent); font-weight:bold; }
-    .btn.warn{ background:rgba(255,102,0,0.08); color:var(--warn); border-color:rgba(255,102,0,0.12); }
-    .btn.danger{ background:rgba(255,0,0,0.06); color:var(--danger); border-color:rgba(255,0,0,0.12); }
-    canvas#mapCanvas{ width:100%; height:auto; border-radius:6px; display:block; background:#040404; }
-    .logs { height:260px; overflow:auto; background:#060606; padding:8px; border-radius:6px; border:1px solid rgba(255,255,255,0.02); color:#bfffbf; font-size:0.9rem; }
-    .log-entry { font-family:monospace; padding:4px 0; border-bottom:1px dashed rgba(255,255,255,0.02); }
-    .log-QUEEN { color: var(--warn); }
-    .log-WARRIOR { color: var(--accent); }
-    .log-SYSTEM { color: var(--muted); }
-    .controls { display:flex; gap:8px; margin-top:8px; }
-    input[type=number] { width:120px; padding:6px; background:#000; color:var(--accent); border:1px solid rgba(0,255,102,0.06); border-radius:6px; }
-    label { color:#cfe8cf; font-size:0.9rem; }
-    .small { font-size:0.85rem; color:var(--muted); }
-    .permission-panel { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#120000; border:3px solid var(--danger); padding:16px; border-radius:8px; z-index:9999; display:none; width:420px; }
-    .permission-panel.active { display:block; }
-    .permission-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.6); display:none; z-index:9998; }
-    .permission-overlay.active { display:block; }
+    :root { --bg:#060606; --accent:#00ff66; --warn:#ff6600; --danger:#ff4444; --muted:#888; --panel:#0f0f0f; }
+    html,body{height:100%;margin:0;background:linear-gradient(#040404,#070707);color:var(--accent);font-family: "Consolas","Courier New",monospace;}
+    .header{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:2px solid rgba(0,255,102,0.06);}
+    h1{margin:0;font-size:1.1rem;color:var(--accent);text-shadow:0 0 8px rgba(0,255,102,0.06);}
+    .stat{background:rgba(0,0,0,0.4);padding:6px 8px;border-radius:6px;font-size:0.9rem;color:var(--accent);}
+    .container{display:grid;grid-template-columns:1fr 420px;gap:12px;padding:12px;height:calc(100% - 64px);box-sizing:border-box;}
+    .left{display:flex;flex-direction:column;gap:12px;}
+    .feeds{display:flex;gap:8px;}
+    .feed{flex:1;border:2px solid rgba(255,255,255,0.03);border-radius:6px;height:220px;overflow:hidden;background:#000;position:relative;}
+    .feed img{width:100%;height:100%;object-fit:cover;display:block;}
+    .feed-label{position:absolute;top:6px;left:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:4px;font-size:0.8rem;color:var(--warn);border:1px solid rgba(255,102,0,0.12);}
+    .panel{background:var(--panel);border:2px solid rgba(0,255,102,0.06);padding:10px;border-radius:8px;color:var(--accent);}
+    canvas#mapCanvas{width:100%;height:auto;border-radius:6px;display:block;background:#040404;}
+    .logs{height:260px;overflow:auto;background:#060606;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.02);color:#bfffbf;font-size:0.9rem;}
+    .log-entry{font-family:monospace;padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.02);}
+    .controls{display:flex;gap:8px;margin-top:8px;}
+    input[type=number]{width:120px;padding:6px;background:#000;color:var(--accent);border:1px solid rgba(0,255,102,0.06);border-radius:6px;}
+    label{color:#cfe8cf;font-size:0.9rem;}
+    .permission-panel{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#120000;border:3px solid var(--danger);padding:16px;border-radius:8px;z-index:9999;display:none;width:420px;}
+    .permission-panel.active{display:block;}
+    .permission-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background: rgba(0,0,0,0.6);display:none;z-index:9998;}
+    .permission-overlay.active{display:block;}
+    .small{font-size:0.85rem;color:var(--muted);}
   </style>
 </head>
 <body>
   <div class="header">
     <h1>🚁 AUTONOMOUS DRONE COMMAND CENTER</h1>
-    <div class="stats">
+    <div style="display:flex;gap:10px;align-items:center;">
       <div class="stat">Scans: <span id="scans">0</span></div>
       <div class="stat">Threat: <span id="threatLevel">GREEN</span></div>
     </div>
@@ -295,7 +334,7 @@ UI_TEMPLATE = r"""
   <div class="container">
     <div class="left">
       <div class="feeds panel">
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex;gap:8px;">
           <div class="feed" style="flex:1">
             <div class="feed-label">🔥 THERMAL (Queen sees)</div>
             <img id="imgQueen" src="/queen" alt="Queen feed">
@@ -312,39 +351,50 @@ UI_TEMPLATE = r"""
       </div>
 
       <div class="panel">
-        <div style="display:flex; gap:12px; align-items:flex-start;">
-          <div class="telemetry">
-            <h3>Telemetry</h3>
-            <div>Patrol Center: <span id="patrolCenter">0, 0</span></div>
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="width:420px;">
+            <h3 style="margin:0 0 8px 0;">Telemetry</h3>
+            <div>Patrol Center (stored): <span id="patrolCenter">0, 0</span></div>
             <div>Patrol Radius: <span id="patrolRadius">30</span> m</div>
+            <div>Patrol Mode: <span id="patrolMode">ABSOLUTE</span></div>
             <div>Warrior Position: <span id="warriorPos">—</span></div>
             <div>Last warrior update: <span id="lastUpdate">—</span></div>
 
-            <div class="controls">
-              <div>
-                <label>Center X</label><br>
-                <input id="centerX" type="number" value="0" step="1">
-              </div>
-              <div>
-                <label>Center Y</label><br>
-                <input id="centerY" type="number" value="0" step="1">
-              </div>
-              <div>
-                <label>Radius</label><br>
-                <input id="radius" type="number" value="30" step="1" min="5">
-              </div>
+            <div style="margin-top:8px;">
+              <label>Center X</label><br>
+              <input id="centerX" type="number" value="0" step="1">
+              <label style="margin-left:8px;"><input id="relativeToggle" type="checkbox"> Relative to Queen</label>
+            </div>
+
+            <div style="margin-top:6px;">
+              <label>Center Y</label><br>
+              <input id="centerY" type="number" value="0" step="1">
+            </div>
+
+            <div style="margin-top:6px;">
+              <label>Radius</label><br>
+              <input id="radius" type="number" value="30" step="1" min="5">
             </div>
 
             <div style="margin-top:8px;">
               <button id="btnUpdate" class="btn">🔄 UPDATE PATROL</button>
-              <button id="btnSpawn" class="btn warn">🎯 SPAWN THREAT</button>
+              <button id="btnSpawn" class="btn" style="background:rgba(255,102,0,0.08);color:var(--warn);">🎯 SPAWN THREAT</button>
+            </div>
+
+            <div style="margin-top:12px;">
+              <h4 style="margin:6px 0 4px 0;">Queen Controls</h4>
+              <label>X</label><br><input id="queenX" type="number" value="0" step="1">
+              <label>Y</label><br><input id="queenY" type="number" value="0" step="1">
+              <label>Z</label><br><input id="queenZ" type="number" value="-20" step="1"><br><br>
+              <button id="btnQueenSet" class="btn">Teleport Queen</button>
+              <button id="btnQueenMove" class="btn">Command Queen to Fly</button>
             </div>
           </div>
 
           <div>
             <h3 style="margin-top:0;">Mini Map</h3>
             <canvas id="mapCanvas" width="420" height="300"></canvas>
-            <div class="small">Green = Warrior • Orange = Patrol center • Circle = Patrol radius</div>
+            <div class="small">Green = Warrior • Orange = Patrol center • Circle = Patrol radius • Blue = Queen</div>
           </div>
         </div>
       </div>
@@ -378,7 +428,7 @@ UI_TEMPLATE = r"""
 
         <div style="margin-top:10px;">
           <button id="btnApprove" class="btn">✅ AUTHORIZE</button>
-          <button id="btnDeny" class="btn danger">❌ DENY</button>
+          <button id="btnDeny" class="btn" style="background:rgba(255,0,0,0.06);color:var(--danger);">❌ DENY</button>
         </div>
 
         <div style="margin-top:12px;">
@@ -395,13 +445,12 @@ UI_TEMPLATE = r"""
     <div id="threatInfo" style="background:#000;padding:8px;border-radius:6px;color:#ffd;"></div>
     <div style="margin-top:10px;display:flex;gap:8px;">
       <button id="panelApprove" class="btn">✅ Authorize</button>
-      <button id="panelDeny" class="btn danger">❌ Deny</button>
+      <button id="panelDeny" class="btn" style="background:rgba(255,0,0,0.06);color:var(--danger);">❌ Deny</button>
     </div>
   </div>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-  let lastThreatId = null;
   const overlay = document.getElementById('permissionOverlay');
   const panel = document.getElementById('permissionPanel');
   const threatInfo = document.getElementById('threatInfo');
@@ -409,21 +458,27 @@ document.addEventListener('DOMContentLoaded', () => {
   const centerXInput = document.getElementById('centerX');
   const centerYInput = document.getElementById('centerY');
   const radiusInput  = document.getElementById('radius');
+  const relativeToggle = document.getElementById('relativeToggle');
+
+  const queenX = document.getElementById('queenX');
+  const queenY = document.getElementById('queenY');
+  const queenZ = document.getElementById('queenZ');
 
   const map = document.getElementById('mapCanvas');
   const ctx = map.getContext('2d');
 
+  let buttonsDisabled = false;
+
   function clearMap(){ ctx.fillStyle = "#040404"; ctx.fillRect(0,0,map.width,map.height); }
 
-  function drawMap(patrol, warriorStatus) {
+  function drawMap(patrol, warriorStatus, queenPos) {
     clearMap();
     if(!patrol) return;
     const cx = patrol.center_x, cy = patrol.center_y, r = patrol.radius;
-    // scale so radius occupies ~40% of min dimension
-    const pxPerMeter = (Math.min(map.width, map.height) * 0.4) / Math.max(1, r);
+    const pxPerMeter = (Math.min(map.width, map.height) * 0.35) / Math.max(1, r);
     const centerScreen = {x: map.width/2, y: map.height/2};
 
-    // draw patrol circle
+    // patrol circle
     ctx.beginPath();
     ctx.strokeStyle = "#ff6600";
     ctx.lineWidth = 2;
@@ -433,7 +488,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.fillStyle = "#ff6600";
     ctx.fillRect(centerScreen.x-5, centerScreen.y-5, 10, 10);
 
-    // warrior
+    // warrior position
     if(warriorStatus && warriorStatus.position){
       const pos = warriorStatus.position;
       const wx = pos[0] - cx;
@@ -447,28 +502,152 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.strokeStyle = "#000";
       ctx.stroke();
     }
+
+    // Queen marker
+    if (queenPos && queenPos.length>=2 && !isNaN(queenPos[0])) {
+      const qx = queenPos[0] - cx;
+      const qy = queenPos[1] - cy;
+      const sx = centerScreen.x + qx*pxPerMeter;
+      const sy = centerScreen.y - qy*pxPerMeter;
+      ctx.fillStyle = "#66ccff";
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.stroke();
+    }
   }
 
   function renderLogs(logs) {
     const logsDiv = document.getElementById('logs');
     logsDiv.innerHTML = logs.reverse().slice(0,200).map(l => {
-      const cls = 'log-' + (l.source || 'SYSTEM');
       const msg = `[${l.time}] [${l.source}] ${l.message}`;
-      return `<div class="log-entry ${cls}">${msg}</div>`;
+      return `<div class="log-entry">${msg}</div>`;
     }).join('');
     logsDiv.scrollTop = logsDiv.scrollHeight;
   }
 
-  function updateStatus() {
-    fetch('/status').then(r => r.json()).then(status => {
+  // Show/hide permission modal
+  function showPermission(threat) {
+    if (!threat) threat = {class:'unknown', world_pos:[0,0]};
+    threatInfo.innerHTML = `
+      <div><strong>Threat:</strong> ${threat.class || 'unknown'}</div>
+      <div><strong>Confidence:</strong> ${threat.confidence ? (Math.round(threat.confidence*100) + '%') : '—'}</div>
+      <div><strong>Coords:</strong> ${threat.world_pos ? `${threat.world_pos[0].toFixed(1)}, ${threat.world_pos[1].toFixed(1)}` : '—'}</div>
+      <div style="margin-top:8px;" class="small">You have the option to Authorize (strike) or Deny. If you do nothing, the system will auto-authorize after timeout.</div>
+    `;
+    overlay.classList.add('active');
+    panel.classList.add('active');
+    // enable buttons
+    document.getElementById('panelApprove').disabled = false;
+    document.getElementById('panelDeny').disabled = false;
+    buttonsDisabled = false;
+  }
+
+  function hidePermission() {
+    overlay.classList.remove('active');
+    panel.classList.remove('active');
+    threatInfo.innerHTML = '';
+    buttonsDisabled = false;
+  }
+
+  // Approve / Deny with disable-once-click to avoid duplicate requests
+  function approve() {
+    if (buttonsDisabled) return;
+    buttonsDisabled = true;
+    document.getElementById('panelApprove').disabled = true;
+    document.getElementById('panelDeny').disabled = true;
+    fetch('/approve', { method: 'POST' })
+      .then(r => r.json()).then(() => {
+        hidePermission();
+      }).catch(e => { console.error(e); hidePermission(); });
+  }
+  function deny() {
+    if (buttonsDisabled) return;
+    buttonsDisabled = true;
+    document.getElementById('panelApprove').disabled = true;
+    document.getElementById('panelDeny').disabled = true;
+    fetch('/deny', { method: 'POST' })
+      .then(r => r.json()).then(() => {
+        hidePermission();
+      }).catch(e => { console.error(e); hidePermission(); });
+  }
+
+  document.getElementById('panelApprove').addEventListener('click', approve);
+  document.getElementById('panelDeny').addEventListener('click', deny);
+
+  // UI handlers (patrol, spawn, queen)
+  function spawnThreatUI() {
+    const type = document.getElementById('threatType').value;
+    const x = parseFloat(document.getElementById('threatX').value);
+    const y = parseFloat(document.getElementById('threatY').value);
+    fetch('/spawn_threat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,type}) })
+      .then(r => r.json()).then(d => { if(d.error) alert('Error: '+d.error); else { alert('Spawned'); } })
+      .catch(e => { console.error(e); alert('Failed to spawn'); });
+  }
+
+  function updatePatrolUI() {
+    const x = parseFloat(centerXInput.value);
+    const y = parseFloat(centerYInput.value);
+    const radius = parseFloat(radiusInput.value);
+    const relative = document.getElementById('relativeToggle').checked;
+    fetch('/set_patrol', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({x,y,radius, relative})
+    }).then(r => r.json()).then(d => {
+      if (d.error) alert('Error: '+d.error); else {
+        setTimeout(updateStatus, 500);
+        alert(`Patrol updated: (${x},${y}) R=${radius} (relative=${relative})`);
+      }
+    }).catch(e => { console.error(e); alert('Failed to update patrol'); });
+  }
+
+  document.getElementById('btnUpdate').addEventListener('click', updatePatrolUI);
+  document.getElementById('btnSpawn').addEventListener('click', spawnThreatUI);
+
+  // Queen controls
+  document.getElementById('btnQueenSet').addEventListener('click', () => {
+    const x = parseFloat(queenX.value); const y = parseFloat(queenY.value); const z = parseFloat(queenZ.value);
+    fetch('/set_queen_pose', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,z}) })
+      .then(r => r.json()).then(d => { if(d.error) alert('Error: '+d.error); else { alert('Queen teleported'); setTimeout(updateStatus,400); } })
+      .catch(e => { console.error(e); alert('Failed to teleport queen'); });
+  });
+
+  document.getElementById('btnQueenMove').addEventListener('click', () => {
+    const x = parseFloat(queenX.value); const y = parseFloat(queenY.value); const z = parseFloat(queenZ.value);
+    fetch('/move_queen', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,z,speed:5.0}) })
+      .then(r => r.json()).then(d => { if(d.error) alert('Error: '+d.error); else { alert('Queen commanded to fly'); setTimeout(updateStatus,400); } })
+      .catch(e => { console.error(e); alert('Failed to move queen'); });
+  });
+
+  // Main polling - get status + logs and show permission modal when pending
+  async function updateStatus() {
+    try {
+      const res = await fetch('/status');
+      const status = await res.json();
       if (status.error) { console.warn("Status error:", status.error); return; }
+
       document.getElementById('scans').textContent = status.queen_scans || 0;
       document.getElementById('threatLevel').textContent = status.threat_level || 'GREEN';
       document.getElementById('patrolCenter').textContent = `${status.patrol_area.center_x.toFixed(1)}, ${status.patrol_area.center_y.toFixed(1)}`;
       document.getElementById('patrolRadius').textContent = `${status.patrol_area.radius.toFixed(1)}`;
-      centerXInput.value = Number(status.patrol_area.center_x).toFixed(1);
-      centerYInput.value = Number(status.patrol_area.center_y).toFixed(1);
-      radiusInput.value  = Number(status.patrol_area.radius).toFixed(1);
+      document.getElementById('patrolMode').textContent = status.patrol_relative ? 'RELATIVE' : 'ABSOLUTE';
+      // Only update UI controls if the user is NOT actively editing them
+      if (document.activeElement !== centerXInput) {
+        centerXInput.value = Number(status.patrol_area.center_x).toFixed(1);
+      }
+      if (document.activeElement !== centerYInput) {
+        centerYInput.value = Number(status.patrol_area.center_y).toFixed(1);
+      }
+      if (document.activeElement !== radiusInput) {
+        radiusInput.value = Number(status.patrol_area.radius).toFixed(1);
+      }
+      // For checkbox, avoid overwriting if user just clicked it (it may get focus)
+      if (document.activeElement !== relativeToggle) {
+        relativeToggle.checked = Boolean(status.patrol_relative);
+      }
+
 
       if (status.warrior_status && status.warrior_status.position) {
         const p = status.warrior_status.position;
@@ -478,81 +657,32 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('warriorPos').textContent = '—';
       }
 
-      drawMap(status.patrol_area, status.warrior_status || null);
+      // render logs
+      const logsRes = await fetch('/logs');
+      const logs = await logsRes.json();
+      renderLogs(logs || []);
+      // draw map (no queen pose exposed yet)
+      drawMap(status.patrol_area, status.warrior_status || null, status.queen_pose);
 
-      // permission panel handling
-      if (status.pending_permission && status.active_threat) {
-        const threatId = JSON.stringify(status.active_threat);
-        if (threatId !== lastThreatId) {
-          lastThreatId = threatId;
-          console.log('🚨 AUTHORIZATION REQUIRED', status.active_threat);
-        }
-        if (panel) panel.classList.add('active');
-        if (overlay) overlay.classList.add('active');
-        if (threatInfo) {
-          const at = status.active_threat;
-          threatInfo.innerHTML = `
-            <p style="color:#ffd;"><strong>${String(at.class || 'UNKNOWN').toUpperCase()}</strong></p>
-            <p>Coords: X:${(at.world_pos && at.world_pos[0] !== undefined ? at.world_pos[0].toFixed(1) : '—')}, Y:${(at.world_pos && at.world_pos[1] !== undefined ? at.world_pos[1].toFixed(1) : '—')}</p>
-            <p>Confidence: ${( (at.confidence||0) * 100).toFixed(0)}%</p>
-            <p style="color:#f88; font-weight:bold;">⏰ 15s to decide</p>
-          `;
-        }
+
+      // permission modal handling
+      if (status.pending_permission) {
+        // show modal with threat info
+        showPermission(status.active_threat);
       } else {
-        lastThreatId = null;
-        if (panel) panel.classList.remove('active');
-        if (overlay) overlay.classList.remove('active');
+        // hide if not pending
+        hidePermission();
       }
-    }).catch(err => console.error('status fetch error', err));
-
-    // logs separately
-    fetch('/logs').then(r => r.json()).then(renderLogs).catch(e => console.error('logs fetch error', e));
+    } catch (e) {
+      console.error("updateStatus error:", e);
+    }
   }
 
-  // UI actions
-  function approve() {
-    fetch('/approve', { method: 'POST' }).then(() => { alert('✅ AUTHORIZED'); }).catch(e => console.error(e));
-  }
-  function deny() {
-    fetch('/deny', { method: 'POST' }).then(() => { alert('❌ DENIED'); }).catch(e => console.error(e));
-  }
-
-  function spawnThreatUI() {
-    const type = document.getElementById('threatType').value;
-    const x = parseFloat(document.getElementById('threatX').value);
-    const y = parseFloat(document.getElementById('threatY').value);
-    fetch('/spawn_threat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,type}) })
-      .then(r => r.json()).then(d => { if(d.error) alert('Error: '+d.error); else alert('Spawned'); })
-      .catch(e => { console.error(e); alert('Failed to spawn'); });
-  }
-
-  function updatePatrolUI() {
-    const x = parseFloat(centerXInput.value);
-    const y = parseFloat(centerYInput.value);
-    const radius = parseFloat(radiusInput.value);
-    fetch('/set_patrol', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,radius}) })
-      .then(r => r.json()).then(d => {
-        if (d.error) alert('Error: '+d.error); else {
-          // small delay to allow status to update on server
-          setTimeout(updateStatus, 400);
-          alert(`Patrol updated: (${x},${y}) R=${radius}`);
-        }
-      }).catch(e => { console.error(e); alert('Failed to update patrol'); });
-  }
-
-  // wiring
-  document.getElementById('btnUpdate').addEventListener('click', updatePatrolUI);
-  document.getElementById('btnSpawn').addEventListener('click', spawnThreatUI);
-  document.getElementById('btnApprove').addEventListener('click', approve);
-  document.getElementById('btnDeny').addEventListener('click', deny);
-  document.getElementById('panelApprove').addEventListener('click', approve);
-  document.getElementById('panelDeny').addEventListener('click', deny);
-
-  // initial and polling
   updateStatus();
-  setInterval(updateStatus, 800);
+  setInterval(updateStatus, 900);
 });
 </script>
+
 </body>
 </html>
 """

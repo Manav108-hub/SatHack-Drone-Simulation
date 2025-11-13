@@ -18,6 +18,7 @@ logger.addHandler(fh)
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
+logger.propagate = False
 
 class SwarmState:
     def __init__(self):
@@ -41,6 +42,9 @@ class SwarmState:
         self.patrol_center_y = 0
         self.patrol_radius = 30
 
+        # Patrol mode: when True, patrol_center_x/y are offsets relative to Queen
+        self.patrol_relative_to_queen = False
+
         # Telemetry
         self.last_warrior_pos = (None, None, None)
         self.last_warrior_update = 0.0
@@ -58,12 +62,12 @@ class SwarmState:
                     data = json.load(f)
                     with self.lock:
                         self.mission_logs = data.get("mission_logs", [])
-                        # keep only tail to limit memory
                         if len(self.mission_logs) > 500:
                             self.mission_logs = self.mission_logs[-500:]
                         self.patrol_center_x = data.get("patrol_center_x", self.patrol_center_x)
                         self.patrol_center_y = data.get("patrol_center_y", self.patrol_center_y)
                         self.patrol_radius = data.get("patrol_radius", self.patrol_radius)
+                        self.patrol_relative_to_queen = data.get("patrol_relative_to_queen", self.patrol_relative_to_queen)
                         logger.info("Loaded persisted state.")
         except Exception as e:
             logger.warning(f"Failed to load persisted swarm state: {e}")
@@ -75,10 +79,11 @@ class SwarmState:
                     "mission_logs": self.mission_logs[-500:],
                     "patrol_center_x": self.patrol_center_x,
                     "patrol_center_y": self.patrol_center_y,
-                    "patrol_radius": self.patrol_radius
+                    "patrol_radius": self.patrol_radius,
+                    "patrol_relative_to_queen": self.patrol_relative_to_queen
                 }
             with open(self.persist_file, "w") as f:
-                json.dump(data, f)
+                json.dump(data, f, indent=2)
         except Exception as e:
             logger.warning(f"Failed to persist swarm state: {e}")
 
@@ -179,18 +184,42 @@ class SwarmState:
         with self.lock:
             return self.warrior_reports[-1] if self.warrior_reports else None
 
-    def set_patrol_area(self, cx, cy, radius):
+    def set_patrol_area(self, cx, cy, radius, relative=False):
+        """Update patrol area - 'relative' means the (cx,cy) are offsets from Queen when True."""
         with self.lock:
             self.patrol_center_x = cx
             self.patrol_center_y = cy
             self.patrol_radius = radius
+            self.patrol_relative_to_queen = bool(relative)
             self.last_patrol_update = time.time()
-        self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m", "WARNING")
+        mode = "RELATIVE_TO_QUEEN" if relative else "ABSOLUTE"
+        self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m MODE={mode}", "WARNING")
         self._persist()
 
     def get_patrol_area(self):
         with self.lock:
             return (self.patrol_center_x, self.patrol_center_y, self.patrol_radius)
+
+    def get_effective_patrol(self, queen_pose=None):
+        """
+        Return effective (center_x, center_y, radius).
+        If patrol_relative_to_queen is True and queen_pose provided (x,y) then center = queen_pos + offset.
+        """
+        with self.lock:
+            cx = self.patrol_center_x
+            cy = self.patrol_center_y
+            r = self.patrol_radius
+            rel = self.patrol_relative_to_queen
+
+        if rel:
+            if queen_pose and len(queen_pose) >= 2 and (queen_pose[0] is not None):
+                eff_x = queen_pose[0] + cx
+                eff_y = queen_pose[1] + cy
+                return (eff_x, eff_y, r)
+            # fallback: return offsets as-is (caller may resolve)
+            return (cx, cy, r)
+        else:
+            return (cx, cy, r)
 
 # single instance
 swarm = SwarmState()
