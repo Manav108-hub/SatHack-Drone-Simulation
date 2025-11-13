@@ -1,76 +1,100 @@
-# main.py (launcher)
-from threading import Thread
-import time
+# main.py
+import os
 import sys
+import time
+import logging
+from threading import Thread
+import traceback
 
-print("\n" + "="*70)
-print("🚁 AUTONOMOUS DRONE SWARM - HIVE INTELLIGENCE")
-print("="*70)
-print("\n📋 DRONES:")
-print("   👑 Queen: AI threat detection (YOLOv8)")
-print("   🛸 Warrior: Autonomous patrol")
-print("   💥 Kamikaze: Strike on command")
-print("="*70 + "\n")
+# Setup a small logger for main
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+logger = logging.getLogger("MAIN")
+logger.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
+logger.addHandler(ch)
 
-input("Press ENTER to launch...")
-
-print("\n🚀 LAUNCHING IN 3...")
-time.sleep(1)
-print("2...")
-time.sleep(1)
-print("1...\n")
-
-sys.stdout.flush()
-
-# modules must be present in same folder: queen.py, warriors.py, kamikaze.py
+# Import the modules (they should exist in the same folder)
+# datacenter defines run_web(host, port)
+import datacenter
 import queen
 import warriors
 import kamikaze
 
-# import datacenter (Flask UI)
-try:
-    import datacenter
-    have_datacenter = True
-except Exception as e:
-    print("⚠️ Warning: could not import datacenter.py (Flask UI). Run UI separately if needed.")
-    print("   Import error:", e)
-    have_datacenter = False
-
 def run_with_catch(func, name):
     try:
+        logger.info(f"Thread starting: {name}")
         func()
+        logger.info(f"Thread finished normally: {name}")
     except Exception as e:
-        print(f"ERROR in {name}: {e}")
+        logger.error(f"Unhandled exception in {name}: {e}")
+        traceback.print_exc()
 
-threads = []
+def start_thread(target, name, daemon=True, delay=0):
+    t = Thread(target=lambda: run_with_catch(target, name), daemon=daemon, name=name)
+    t.start()
+    if delay:
+        time.sleep(delay)
+    return t
 
-# Start the datacenter (web UI) in a daemon thread so it shares swarm_state
-if have_datacenter:
-    t_web = Thread(target=lambda: run_with_catch(lambda: datacenter.run_web(host='0.0.0.0', port=5000), "Datacenter"), daemon=True)
-    t_web.start()
-    threads.append(t_web)
-    print("🌐 Datacenter (web UI) thread started (http://localhost:5000)")
+def main():
+    print("\n" + "="*70)
+    print("🚁 AUTONOMOUS DRONE SWARM - HIVE INTELLIGENCE")
+    print("="*70)
+    print("\n📋 DRONES:")
+    print("   👑 Queen: AI threat detection (YOLOv8)")
+    print("   🛸 Warrior: Autonomous patrol")
+    print("   💥 Kamikaze: Strike on command")
+    print("="*70 + "\n")
 
-# Start queen/warrior/kamikaze threads
-t1 = Thread(target=lambda: run_with_catch(queen.run, "Queen"), daemon=True)
-t2 = Thread(target=lambda: run_with_catch(warriors.run, "Warrior"), daemon=True)
-t3 = Thread(target=lambda: run_with_catch(kamikaze.run, "Kamikaze"), daemon=True)
+    input("Press ENTER to launch...")
 
-t1.start()
-time.sleep(1)
-t2.start()
-time.sleep(1)
-t3.start()
+    print("\n🚀 LAUNCHING IN 3...")
+    time.sleep(1)
+    print("2...")
+    time.sleep(1)
+    print("1...\n")
+    sys.stdout.flush()
 
-threads.extend([t1, t2, t3])
+    # Start datacenter web UI in a daemon thread (so it shares the same memory & swarm instance)
+    try:
+        web_thread = Thread(target=lambda: datacenter.run_web(host='0.0.0.0', port=5000),
+                            daemon=True, name="Datacenter-Web")
+        web_thread.start()
+        logger.info("🌐 Datacenter (web UI) thread started (http://localhost:5000)")
+    except Exception as e:
+        logger.error(f"Failed to start datacenter thread: {e}")
+        traceback.print_exc()
 
-try:
-    # Keep main alive while threads run
-    while any(t.is_alive() for t in threads):
-        time.sleep(0.5)
-except KeyboardInterrupt:
-    print("\n\n⚠️  Interrupted")
+    # Small delay so web UI begins before drones (helps when UI polls immediately)
+    time.sleep(1.2)
 
-print("\n" + "="*70)
-print("✅ MISSION COMPLETE")
-print("="*70)
+    # Start Queen, Warrior, Kamikaze as daemon threads using the run() entrypoints
+    t1 = start_thread(queen.run, "Queen", daemon=True)
+    time.sleep(2)
+    t2 = start_thread(warriors.run, "Warrior", daemon=True)
+    time.sleep(2)
+    t3 = start_thread(kamikaze.run, "Kamikaze", daemon=True)
+
+    try:
+        # Keep main thread alive while any child threads are running
+        while True:
+            alive = any(t.is_alive() for t in [web_thread, t1, t2, t3] if t is not None)
+            if not alive:
+                logger.info("All threads have stopped. Exiting.")
+                break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received — shutting down.")
+    except Exception as e:
+        logger.error(f"Main loop error: {e}")
+        traceback.print_exc()
+    finally:
+        print("\n" + "="*70)
+        print("✅ SHUTTING DOWN")
+        print("="*70 + "\n")
+        # Threads are daemon — process will exit cleanly
+
+if __name__ == '__main__':
+    main()
