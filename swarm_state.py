@@ -1,6 +1,23 @@
+# swarm_state.py
 from threading import Lock
 import time
 from datetime import datetime
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+
+# --- Logging setup for swarm/system (one file) ---
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+logger = logging.getLogger("SWARM")
+logger.setLevel(logging.DEBUG)
+fh = RotatingFileHandler(os.path.join(LOG_DIR, "swarm.log"), maxBytes=2_000_000, backupCount=3)
+fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
+logger.addHandler(fh)
+ch = logging.StreamHandler()
+ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
+logger.addHandler(ch)
 
 class SwarmState:
     def __init__(self):
@@ -23,7 +40,49 @@ class SwarmState:
         self.patrol_center_x = 0
         self.patrol_center_y = 0
         self.patrol_radius = 30
-        
+
+        # Telemetry
+        self.last_warrior_pos = (None, None, None)
+        self.last_warrior_update = 0.0
+        self.last_patrol_update = 0.0
+
+        # Persist file
+        self.persist_file = os.path.join(LOG_DIR, "swarm_persist.json")
+        self._load_persisted()
+
+    # --- persistence ---
+    def _load_persisted(self):
+        try:
+            if os.path.isfile(self.persist_file):
+                with open(self.persist_file, "r") as f:
+                    data = json.load(f)
+                    with self.lock:
+                        self.mission_logs = data.get("mission_logs", [])
+                        # keep only tail to limit memory
+                        if len(self.mission_logs) > 500:
+                            self.mission_logs = self.mission_logs[-500:]
+                        self.patrol_center_x = data.get("patrol_center_x", self.patrol_center_x)
+                        self.patrol_center_y = data.get("patrol_center_y", self.patrol_center_y)
+                        self.patrol_radius = data.get("patrol_radius", self.patrol_radius)
+                        logger.info("Loaded persisted state.")
+        except Exception as e:
+            logger.warning(f"Failed to load persisted swarm state: {e}")
+
+    def _persist(self):
+        try:
+            with self.lock:
+                data = {
+                    "mission_logs": self.mission_logs[-500:],
+                    "patrol_center_x": self.patrol_center_x,
+                    "patrol_center_y": self.patrol_center_y,
+                    "patrol_radius": self.patrol_radius
+                }
+            with open(self.persist_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.warning(f"Failed to persist swarm state: {e}")
+
+    # --- logging helper that writes to mission_logs and file logger ---
     def log(self, source, message, level="INFO"):
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_entry = {
@@ -34,17 +93,27 @@ class SwarmState:
         }
         with self.lock:
             self.mission_logs.append(log_entry)
-            if len(self.mission_logs) > 200:
+            if len(self.mission_logs) > 2000:
                 self.mission_logs.pop(0)
-        print(f"[{timestamp}] [{source}] {message}")
-    
+        # also send to file logger with source tag
+        if level == "CRITICAL":
+            logger.error(f"[{source}] {message}")
+        elif level == "WARNING":
+            logger.warning(f"[{source}] {message}")
+        else:
+            logger.info(f"[{source}] {message}")
+
+        # persist occasionally
+        if len(self.mission_logs) % 20 == 0:
+            self._persist()
+
     def add_threat(self, threat_data):
         with self.lock:
             self.threats.append(threat_data)
             self.active_threat = threat_data
             self.threat_level = "RED"
         self.log("QUEEN", f"🚨 THREAT: {threat_data['class']} at ({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})", "CRITICAL")
-    
+
     def warrior_report(self, position):
         report = {
             'time': datetime.now().strftime("%H:%M:%S"),
@@ -53,19 +122,23 @@ class SwarmState:
         }
         with self.lock:
             self.warrior_reports.append(report)
-            if len(self.warrior_reports) > 20:
+            if len(self.warrior_reports) > 200:
                 self.warrior_reports.pop(0)
-        
+            # update telemetry
+            self.last_warrior_pos = position
+            self.last_warrior_update = time.time()
+        # log summary occasionally
         if len(self.warrior_reports) % 5 == 0:
             self.log("WARRIOR", f"Pos: ({position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f})", "INFO")
-    
+
     def request_permission(self):
         if self.queen_mode == "jammer":
             self.log("SYSTEM", "⚡ JAMMER MODE - AUTO-AUTH", "WARNING")
             return True
         
         self.log("QUEEN", "📞 REQUESTING AUTHORIZATION", "WARNING")
-        self.log("QUEEN", f"Target: {self.active_threat['class']} @ ({self.active_threat['world_pos'][0]:.1f}, {self.active_threat['world_pos'][1]:.1f})", "WARNING")
+        if self.active_threat:
+            self.log("QUEEN", f"Target: {self.active_threat['class']} @ ({self.active_threat['world_pos'][0]:.1f}, {self.active_threat['world_pos'][1]:.1f})", "WARNING")
         
         self.pending_permission = True
         
@@ -77,7 +150,6 @@ class SwarmState:
             elapsed = int(time.time() - start)
             remaining = timeout - elapsed
             
-            # Log countdown every 5 seconds
             if remaining != last_countdown and remaining % 5 == 0:
                 self.log("SYSTEM", f"⏳ Waiting for authorization... {remaining}s remaining", "WARNING")
                 last_countdown = remaining
@@ -93,12 +165,12 @@ class SwarmState:
                 else:
                     self.log("USER", "❌ DENIED", "WARNING")
                     return False
-            time.sleep(0.2)  # Check more frequently
+            time.sleep(0.2)
         
         self.log("SYSTEM", "⏱️ TIMEOUT - AUTO-AUTH", "WARNING")
         self.pending_permission = False
         return True
-    
+
     def get_logs(self, limit=50):
         with self.lock:
             return self.mission_logs[-limit:]
@@ -106,18 +178,19 @@ class SwarmState:
     def get_warrior_status(self):
         with self.lock:
             return self.warrior_reports[-1] if self.warrior_reports else None
-    
+
     def set_patrol_area(self, cx, cy, radius):
-        """Update patrol area - called from web UI"""
         with self.lock:
             self.patrol_center_x = cx
             self.patrol_center_y = cy
             self.patrol_radius = radius
+            self.last_patrol_update = time.time()
         self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m", "WARNING")
-    
+        self._persist()
+
     def get_patrol_area(self):
-        """Get current patrol area safely"""
         with self.lock:
             return (self.patrol_center_x, self.patrol_center_y, self.patrol_radius)
 
+# single instance
 swarm = SwarmState()
