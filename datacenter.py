@@ -4,6 +4,7 @@ import time
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
+from swarm_state import to_serializable
 
 from flask import Flask, Response, render_template_string, jsonify, request
 import airsim
@@ -169,6 +170,7 @@ def status():
             # <<< FIXED LINE >>>
             'queen_pose': queen_pose
         }
+        status_data = to_serializable(status_data)
         return jsonify(status_data)
     except Exception as e:
         logger.exception("Status error")
