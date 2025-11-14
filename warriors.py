@@ -1,91 +1,148 @@
-import airsim
+import os
 import time
 import math
+import logging
+from logging.handlers import RotatingFileHandler
+
+import airsim
 from swarm_state import swarm
 
+# ----------------------------
+# Logging for Warrior
+# ----------------------------
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger("WARRIOR")
+logger.setLevel(logging.DEBUG)
+fh = RotatingFileHandler(os.path.join(LOG_DIR, "warrior.log"), maxBytes=2_000_000, backupCount=3)
+fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
+logger.addHandler(fh)
+ch = logging.StreamHandler()
+ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
+logger.addHandler(ch)
+
+
 class Warrior:
-    def __init__(self):
+    def __init__(self, vehicle_name="Warrior1"):
+        self.vehicle_name = vehicle_name
+
         try:
-            print("Warrior: Connecting to AirSim...")
+            logger.info("Warrior: Connecting to AirSim...")
             self.client = airsim.MultirotorClient()
             self.client.confirmConnection()
-            print("Warrior: Connected!")
+            logger.info("Warrior: Connected to AirSim")
+
         except Exception as e:
-            print(f"❌ WARRIOR ERROR: {e}")
+            logger.exception("Warrior: Connection to AirSim failed")
+            swarm.log("WARRIOR", f"❌ WARRIOR ERROR: {e}", "CRITICAL")
             raise
-        
-        # Store last known patrol settings to detect changes
-        self.last_center_x = None
-        self.last_center_y = None
-        self.last_radius = None
-        
-    def check_patrol_update(self):
-        """Check if patrol area was updated"""
-        if (self.last_center_x != swarm.patrol_center_x or 
-            self.last_center_y != swarm.patrol_center_y or 
-            self.last_radius != swarm.patrol_radius):
-            
-            self.last_center_x = swarm.patrol_center_x
-            self.last_center_y = swarm.patrol_center_y
-            self.last_radius = swarm.patrol_radius
-            
-            swarm.log("WARRIOR", f"Patrol updated: ({self.last_center_x:.0f}, {self.last_center_y:.0f}) R={self.last_radius:.0f}m", "WARNING")
+
+    # ------------------------------------------------
+    # Safe movement wrapper
+    # ------------------------------------------------
+    def _safe_move(self, x, y, z=-15, speed=8, timeout_sec=15):
+        try:
+            f = self.client.moveToPositionAsync(
+                x, y, z, speed, vehicle_name=self.vehicle_name
+            )
+            f.join(timeout_sec)
             return True
-        return False
-        
-    def scan_position(self, x, y):
-        """Move to position and scan for 3 seconds"""
-        swarm.log("WARRIOR", f"→ ({x:.0f}, {y:.0f})", "INFO")
-        
-        # Move and WAIT for completion
-        self.client.moveToPositionAsync(x, y, -15, 8, vehicle_name="Warrior1").join()
-        
-        # Scan for 3 seconds
-        for i in range(3):
-            pos = self.client.simGetVehiclePose("Warrior1").position
-            swarm.warrior_report((pos.x_val, pos.y_val, pos.z_val))
-            time.sleep(1)
-        
+        except Exception as e:
+            logger.warning(f"Move error: {e}")
+            swarm.log("WARRIOR", f"Move error: {e}", "WARNING")
+            return False
+
+    # ------------------------------------------------
+    # Report position
+    # ------------------------------------------------
+    def _report_position(self):
+        try:
+            pose = self.client.simGetVehiclePose(self.vehicle_name).position
+            pos = (pose.x_val, pose.y_val, pose.z_val)
+            swarm.warrior_report(pos)
+        except Exception:
+            logger.debug("Failed to report warrior position")
+
+    # ------------------------------------------------
+    # Main loop
+    # ------------------------------------------------
     def run(self):
         swarm.log("WARRIOR", "Initializing", "INFO")
-        
-        self.client.enableApiControl(True, "Warrior1")
-        self.client.armDisarm(True, "Warrior1")
-        self.client.takeoffAsync(vehicle_name="Warrior1").join()
-        
-        # Initialize patrol settings
-        self.check_patrol_update()
-        
-        swarm.log("WARRIOR", f"Patrol: ({swarm.patrol_center_x:.0f}, {swarm.patrol_center_y:.0f}) R={swarm.patrol_radius:.0f}m", "INFO")
-        
+        logger.info("Warrior run() starting")
+
+        # Startup sequence
+        try:
+            self.client.enableApiControl(True, self.vehicle_name)
+            self.client.armDisarm(True, self.vehicle_name)
+            self.client.takeoffAsync(vehicle_name=self.vehicle_name).join(10)
+        except Exception:
+            pass
+
         angle = 0
-        
+        last_patrol = None
+
         while not swarm.kamikaze_deployed:
+
+            # ------------------------------------------------------------------
+            # ALWAYS compute patrol center the SAME WAY
+            # ------------------------------------------------------------------
             try:
-                # Check for patrol updates EVERY loop
-                self.check_patrol_update()
-                
-                cx = swarm.patrol_center_x
-                cy = swarm.patrol_center_y
-                radius = swarm.patrol_radius
-                
-                # Calculate patrol waypoint
-                x = cx + radius * math.cos(math.radians(angle))
-                y = cy + radius * math.sin(math.radians(angle))
-                
-                # Scan this position
-                self.scan_position(x, y)
-                
-                # Next waypoint (60 degrees = 6 points per circle)
-                angle = (angle + 60) % 360
-                
+                # Try to get queen
+                try:
+                    qp = self.client.simGetVehiclePose("Queen").position
+                    queen_xy = (qp.x_val, qp.y_val)
+                except Exception:
+                    queen_xy = None
+
+                # Effective patrol center (ABSOLUTE or RELATIVE internally handled)
+                cx, cy, radius = swarm.get_effective_patrol(queen_xy)
+                current_patrol = (cx, cy, radius)
+
             except Exception as e:
-                swarm.log("WARRIOR", f"Error: {e}", "WARNING")
+                swarm.log("WARRIOR", f"Patrol calc error: {e}", "WARNING")
                 time.sleep(1)
-        
-        swarm.log("WARRIOR", "RTB", "WARNING")
-        self.client.hoverAsync(vehicle_name="Warrior1").join()
+                continue
+
+            # ------------------------------------------------------------------
+            # Detect patrol change
+            # ------------------------------------------------------------------
+            if last_patrol != current_patrol:
+                swarm.log(
+                    "WARRIOR",
+                    f"🎯 PATROL CHANGE: ({cx:.1f}, {cy:.1f}) R={radius:.1f}",
+                    "WARNING",
+                )
+                last_patrol = current_patrol
+                angle = 0
+
+            # ------------------------------------------------------------------
+            # Compute next waypoint on patrol circle
+            # ------------------------------------------------------------------
+            x = cx + radius * math.cos(math.radians(angle))
+            y = cy + radius * math.sin(math.radians(angle))
+            z = -15
+
+            swarm.log("WARRIOR", f"→ ({x:.1f}, {y:.1f})", "INFO")
+            self._safe_move(x, y, z=z, speed=8, timeout_sec=20)
+
+            # Report position a few times for smooth UI
+            for _ in range(3):
+                self._report_position()
+                time.sleep(1)
+
+            # Update angle
+            angle = (angle + 60) % 360
+
+        # ------------------------------------------------------------------
+        # Mission complete
+        # ------------------------------------------------------------------
+        swarm.log("WARRIOR", "RTB (hover)", "WARNING")
+        try:
+            self.client.hoverAsync(vehicle_name=self.vehicle_name)
+        except:
+            pass
+
 
 def run():
-    warrior = Warrior()
-    warrior.run()
+    Warrior().run()
