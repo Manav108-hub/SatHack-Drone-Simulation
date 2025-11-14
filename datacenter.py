@@ -35,18 +35,15 @@ app = Flask(__name__)
 clients = {}
 
 def get_client(drone):
-    """Return a cached AirSim client for a drone name. Robust to connection errors."""
-    if drone in clients:
-        return clients[drone]
+    """Always return a NEW AirSim client — fixes IOLoop conflict."""
     try:
         client = airsim.MultirotorClient()
         client.confirmConnection()
-        clients[drone] = client
-        logger.info(f"Connected AirSim client for {drone}")
         return client
     except Exception as e:
-        logger.warning(f"Could not create AirSim client for {drone}: {e}")
+        logger.warning(f"AirSim client failed for {drone}: {e}")
         return None
+
 
 def get_frame_bytes(drone, feed_style="normal", use_ai=False):
     """Grab a single camera frame from AirSim for a named drone and return JPEG bytes or None."""

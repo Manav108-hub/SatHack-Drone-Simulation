@@ -194,10 +194,45 @@ class SwarmState:
     # -------------------------------------------------------
     def request_permission(self):
 
-        # FOR DEMOS (instant authorization)
-        # comment this out for real mission logic
-        self.log("SYSTEM", "⚡ DEMO MODE: AUTO-AUTHORIZED", "CRITICAL")
+        # --- REAL AUTH LOGIC STARTS HERE ---
+        if self.queen_mode == "jammer":
+            self.log("SYSTEM", "⚡ JAMMER MODE - AUTO-AUTH", "WARNING")
+            return True
+
+        self.log("QUEEN", "📞 REQUESTING AUTHORIZATION", "WARNING")
+
+        if self.active_threat:
+            self.log("QUEEN",
+                    f"Target: {self.active_threat['class']} @ "
+                    f"({self.active_threat['world_pos'][0]:.1f}, "
+                    f"{self.active_threat['world_pos'][1]:.1f})",
+                    "WARNING")
+
+        self.pending_permission = True
+        self.user_response = None
+
+        start = time.time()
+        timeout = 15
+
+        while time.time() - start < timeout:
+            if self.user_response is not None:
+                approved = self.user_response
+                self.pending_permission = False
+                self.user_response = None
+
+                if approved:
+                    self.log("USER", "✅ AUTHORIZED", "CRITICAL")
+                    return True
+                else:
+                    self.log("USER", "❌ DENIED", "WARNING")
+                    return False
+
+            time.sleep(0.2)
+
+        self.log("SYSTEM", "⏱️ TIMEOUT - AUTO-AUTH", "WARNING")
+        self.pending_permission = False
         return True
+
 
         # --- Real logic kept below for future use ----
         # ...
