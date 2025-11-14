@@ -6,6 +6,8 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import math
+import sys
 
 # --- Logging setup for swarm/system (one file) ---
 LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
@@ -15,7 +17,11 @@ logger.setLevel(logging.DEBUG)
 fh = RotatingFileHandler(os.path.join(LOG_DIR, "swarm.log"), maxBytes=2_000_000, backupCount=3)
 fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
 logger.addHandler(fh)
-ch = logging.StreamHandler()
+
+# ✅ FIX: UTF-8 encoding for console output to handle emojis
+ch = logging.StreamHandler(sys.stdout)
+if hasattr(ch.stream, 'reconfigure'):
+    ch.stream.reconfigure(encoding='utf-8')
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
 logger.propagate = False
@@ -23,24 +29,26 @@ logger.propagate = False
 class SwarmState:
     def __init__(self):
         self.lock = Lock()
-        self.threats = []
-        self.active_threat = None
+        # Active detection and lower-confidence pings
+        self.threats = []            # historical list (all)
+        self.pings = []              # lower-confidence sightings that did not become active
+        self.active_threat = None    # single active target (highest confidence)
         self.queen_mode = "normal"
         self.kamikaze_deployed = False
         self.kamikaze_target = None
-        
+
         self.mission_logs = []
         self.warrior_reports = []
         self.queen_scans = 0
         self.threat_level = "GREEN"
-        
+
         self.pending_permission = False
         self.user_response = None
-        
+
         # Patrol settings
-        self.patrol_center_x = 0
-        self.patrol_center_y = 0
-        self.patrol_radius = 30
+        self.patrol_center_x = 0.0
+        self.patrol_center_y = 0.0
+        self.patrol_radius = 30.0
 
         # Patrol mode: when True, patrol_center_x/y are offsets relative to Queen
         self.patrol_relative_to_queen = False
@@ -49,6 +57,7 @@ class SwarmState:
         self.last_warrior_pos = (None, None, None)
         self.last_warrior_update = 0.0
         self.last_patrol_update = 0.0
+        self.last_queen_pos = (None, None, None)
 
         # Persist file
         self.persist_file = os.path.join(LOG_DIR, "swarm_persist.json")
@@ -113,11 +122,58 @@ class SwarmState:
             self._persist()
 
     def add_threat(self, threat_data):
+        """
+        New logic:
+         - Keep the highest-confidence sighting as active_threat.
+         - If incoming threat has higher confidence than current active, PROMOTE it
+           (previous active gets moved to pings).
+         - Otherwise, append to pings only (no replacement).
+         - All threats are appended to historical self.threats for audit.
+        Expected threat_data: {'class':str, 'confidence':float, 'world_pos':(x,y), 'timestamp':float}
+        """
         with self.lock:
+            # normalize confidence
+            conf = float(threat_data.get('confidence', 0.0))
+            threat_data['confidence'] = conf
             self.threats.append(threat_data)
-            self.active_threat = threat_data
-            self.threat_level = "RED"
-        self.log("QUEEN", f"🚨 THREAT: {threat_data['class']} at ({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})", "CRITICAL")
+            # prune history
+            if len(self.threats) > 2000:
+                self.threats.pop(0)
+
+            current = self.active_threat
+            if current is None:
+                # No active — set incoming as active
+                self.active_threat = threat_data.copy()
+                self.threat_level = "RED"
+                self.log("QUEEN", f"NEW ACTIVE THREAT: {threat_data['class']} ({conf:.2f}) at ({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})", "CRITICAL")
+            else:
+                cur_conf = float(current.get('confidence', 0.0))
+                # Promote if new is higher than current by a small margin (>=)
+                if conf >= cur_conf:
+                    # demote current to pings
+                    try:
+                        self.pings.insert(0, current.copy())
+                    except Exception:
+                        self.pings.insert(0, current)
+                    # limit pings size
+                    if len(self.pings) > 200:
+                        self.pings.pop()
+                    # set new active
+                    self.active_threat = threat_data.copy()
+                    self.threat_level = "RED"
+                    self.log("QUEEN", f"PROMOTED NEW ACTIVE: {threat_data['class']} ({conf:.2f}) at ({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})", "CRITICAL")
+                else:
+                    # lower-confidence: keep as ping only
+                    try:
+                        self.pings.insert(0, threat_data.copy())
+                    except Exception:
+                        self.pings.insert(0, threat_data)
+                    if len(self.pings) > 200:
+                        self.pings.pop()
+                    # keep threat_level or possibly escalate if lots of pings (simple heuristic)
+                    if self.threat_level != "RED":
+                        self.threat_level = "YELLOW"
+                    self.log("QUEEN", f"PING: {threat_data['class']} ({conf:.2f}) at ({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})", "WARNING")
 
     def warrior_report(self, position):
         report = {
@@ -138,48 +194,48 @@ class SwarmState:
 
     def request_permission(self):
         if self.queen_mode == "jammer":
-            self.log("SYSTEM", "⚡ JAMMER MODE - AUTO-AUTH", "WARNING")
+            self.log("SYSTEM", "JAMMER MODE - AUTO-AUTH", "WARNING")
             return True
-        
-        self.log("QUEEN", "📞 REQUESTING AUTHORIZATION", "WARNING")
+
+        self.log("QUEEN", "REQUESTING AUTHORIZATION", "WARNING")
         if self.active_threat:
             self.log("QUEEN", f"Target: {self.active_threat['class']} @ ({self.active_threat['world_pos'][0]:.1f}, {self.active_threat['world_pos'][1]:.1f})", "WARNING")
-        
+
         self.pending_permission = True
-        
+
         start = time.time()
         timeout = 15  # 15 seconds
         last_countdown = 0
-        
+
         while time.time() - start < timeout:
             elapsed = int(time.time() - start)
             remaining = timeout - elapsed
-            
+
             if remaining != last_countdown and remaining % 5 == 0:
-                self.log("SYSTEM", f"⏳ Waiting for authorization... {remaining}s remaining", "WARNING")
+                self.log("SYSTEM", f"Waiting for authorization... {remaining}s remaining", "WARNING")
                 last_countdown = remaining
-            
+
             if self.user_response is not None:
                 approved = self.user_response
                 self.user_response = None
                 self.pending_permission = False
-                
+
                 if approved:
-                    self.log("USER", "✅ AUTHORIZED", "CRITICAL")
+                    self.log("USER", "AUTHORIZED", "CRITICAL")
                     return True
                 else:
-                    self.log("USER", "❌ DENIED", "WARNING")
+                    self.log("USER", "DENIED", "WARNING")
                     return False
             time.sleep(0.2)
-        
-        self.log("SYSTEM", "⏱️ TIMEOUT - AUTO-AUTH", "WARNING")
+
+        self.log("SYSTEM", "TIMEOUT - AUTO-AUTH", "WARNING")
         self.pending_permission = False
         return True
 
     def get_logs(self, limit=50):
         with self.lock:
             return self.mission_logs[-limit:]
-    
+
     def get_warrior_status(self):
         with self.lock:
             return self.warrior_reports[-1] if self.warrior_reports else None
@@ -187,13 +243,13 @@ class SwarmState:
     def set_patrol_area(self, cx, cy, radius, relative=False):
         """Update patrol area - 'relative' means the (cx,cy) are offsets from Queen when True."""
         with self.lock:
-            self.patrol_center_x = cx
-            self.patrol_center_y = cy
-            self.patrol_radius = radius
+            self.patrol_center_x = float(cx)
+            self.patrol_center_y = float(cy)
+            self.patrol_radius = float(radius)
             self.patrol_relative_to_queen = bool(relative)
             self.last_patrol_update = time.time()
         mode = "RELATIVE_TO_QUEEN" if relative else "ABSOLUTE"
-        self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m MODE={mode}", "WARNING")
+        self.log("SYSTEM", f"Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m MODE={mode}", "WARNING")
         self._persist()
 
     def get_patrol_area(self):
@@ -220,6 +276,31 @@ class SwarmState:
             return (cx, cy, r)
         else:
             return (cx, cy, r)
+
+    # ========== NEW FUNCTIONS ==========
+    
+    def expand_patrol(self, multiplier=1.5):
+        """Expand patrol radius by multiplier"""
+        with self.lock:
+            self.patrol_radius = float(self.patrol_radius * multiplier)
+            self._persist()
+        self.log("SYSTEM", f"Patrol expanded to R={self.patrol_radius:.1f}m", "INFO")
+        return self.patrol_radius
+
+    def distribute_patrol_points(self, n=3, spread=1.0):
+        """Return N patrol waypoints distributed around the patrol circle"""
+        with self.lock:
+            cx, cy, r = self.patrol_center_x, self.patrol_center_y, self.patrol_radius * spread
+        
+        points = []
+        angle_step = 360 / n
+        for i in range(n):
+            angle = i * angle_step
+            x = cx + r * math.cos(math.radians(angle))
+            y = cy + r * math.sin(math.radians(angle))
+            points.append((x, y))
+        
+        return points
 
 # single instance
 swarm = SwarmState()

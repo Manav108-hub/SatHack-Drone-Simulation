@@ -4,6 +4,7 @@ import math
 import logging
 from logging.handlers import RotatingFileHandler
 import threading
+import sys  # ← ADD THIS
 
 import airsim
 from swarm_state import swarm
@@ -19,16 +20,19 @@ logger.setLevel(logging.DEBUG)
 fh = RotatingFileHandler(os.path.join(LOG_DIR, "warriors.log"), maxBytes=5_000_000, backupCount=3)
 fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
 logger.addHandler(fh)
-ch = logging.StreamHandler()
+
+# ✅ FIX: UTF-8 encoding
+ch = logging.StreamHandler(sys.stdout)
+if hasattr(ch.stream, 'reconfigure'):
+    ch.stream.reconfigure(encoding='utf-8')
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
-
 
 class Warrior:
     def __init__(self, vehicle_name="Warrior1", angle_offset=0):
         self.vehicle_name = vehicle_name
         self.angle_offset = angle_offset
-        self.client = None
+        self.client = None  # Will be created in run()
 
     def _connect(self):
         """Create a dedicated client for this warrior"""
@@ -43,16 +47,12 @@ class Warrior:
             swarm.log(self.vehicle_name, f"ERROR: {e}", "CRITICAL")
             return False
 
-    def _safe_move(self, x, y, z=-15, speed=8, timeout=15):
-        """Move with timeout and error handling"""
+    def _safe_move(self, x, y, z=-15, speed=8):
         try:
             f = self.client.moveToPositionAsync(
-                x, y, z, speed, 
-                timeout_sec=timeout,
-                vehicle_name=self.vehicle_name
+                x, y, z, speed, vehicle_name=self.vehicle_name
             )
-            # Don't block - let it move asynchronously
-            time.sleep(0.5)  # Small delay to start movement
+            f.join()  # Fixed: removed timeout parameter
             return True
         except Exception as e:
             logger.warning(f"{self.vehicle_name} move error: {e}")
@@ -68,7 +68,7 @@ class Warrior:
             pass
 
     def run(self):
-        # Connect to AirSim FIRST
+        # Connect to AirSim FIRST - each warrior gets own client
         if not self._connect():
             logger.error(f"{self.vehicle_name}: Failed to connect, aborting")
             return
@@ -83,7 +83,7 @@ class Warrior:
             self.client.armDisarm(True, self.vehicle_name)
             time.sleep(0.5)
             
-            # Takeoff
+            # Fixed: Don't pass timeout to join()
             future = self.client.takeoffAsync(vehicle_name=self.vehicle_name)
             future.join()
             
@@ -95,7 +95,6 @@ class Warrior:
 
         angle = self.angle_offset
         last_patrol = None
-        move_counter = 0
 
         while not swarm.kamikaze_deployed:
             try:
@@ -125,30 +124,20 @@ class Warrior:
                 y = cy + radius * math.sin(math.radians(angle))
                 z = -15
 
-                # Move to waypoint
                 logger.debug(f"{self.vehicle_name} -> ({x:.1f}, {y:.1f})")
-                self._safe_move(x, y, z=z, speed=10, timeout=20)
-                
-                # Report position multiple times while moving
-                for i in range(8):  # Report 8 times over 8 seconds
+                self._safe_move(x, y, z=z, speed=8)
+
+                # Report position
+                for _ in range(2):
                     self._report_position()
                     time.sleep(1)
-                    
-                    # Check if we should abort
-                    if swarm.kamikaze_deployed:
-                        break
-                
-                # Update angle for next waypoint
+
+                # Update angle
                 angle = (angle + 60) % 360
-                move_counter += 1
-                
-                # Log every 5 moves
-                if move_counter % 5 == 0:
-                    logger.info(f"{self.vehicle_name}: Completed {move_counter} patrol waypoints")
 
             except Exception as e:
-                logger.error(f"{self.vehicle_name} loop error: {e}")
-                time.sleep(3)
+                logger.error(f"{self.vehicle_name} error: {e}")
+                time.sleep(2)
 
         # Mission complete
         swarm.log(self.vehicle_name, "RTB (hover)", "WARNING")
@@ -213,7 +202,7 @@ def run():
         t.start()
         threads.append(t)
         logger.info(f"Started thread for {warrior_name} at angle {angle_offset}")
-        time.sleep(2)
+        time.sleep(2)  # Increased stagger time
     
     logger.info(f"All {len(warriors_list)} warrior threads started")
     

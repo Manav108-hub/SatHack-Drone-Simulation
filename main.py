@@ -17,6 +17,7 @@ logger.addHandler(ch)
 import datacenter
 import queen
 import warriors
+import warrior_multi
 import kamikaze
 
 def run_with_catch(func, name):
@@ -67,8 +68,10 @@ def main():
 
     t1 = start_thread(queen.run, "Queen", daemon=True)
     time.sleep(2)
-    t2 = start_thread(warriors.run, "Warrior", daemon=True)
-    time.sleep(2)
+    # t2 = start_thread(warriors.run, "Warrior", daemon=True)
+    # time.sleep(2)
+    t2 = start_thread(warrior_multi.run, "Warrior", daemon=True)
+    time.sleep(5)
     t3 = start_thread(kamikaze.run, "Kamikaze", daemon=True)
 
     try:

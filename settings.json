@@ -1,0 +1,242 @@
+{
+  "SettingsVersion": 1.2,
+  "SimMode": "Multirotor",
+
+  "CameraDefaults": {
+    "CaptureSettings": [
+      {
+        "ImageType": 0,
+        "Width": 1280,
+        "Height": 720,
+        "FOV_Degrees": 90,
+        "AutoExposureSpeed": 100,
+        "MotionBlurAmount": 0
+      }
+    ]
+  },
+
+  "Vehicles": {
+    "Queen": {
+      "VehicleType": "SimpleFlight",
+      "X": 0,
+      "Y": 0,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+
+    "Warrior1": {
+      "VehicleType": "SimpleFlight",
+      "X": 15,
+      "Y": 0,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Warrior2": {
+      "VehicleType": "SimpleFlight",
+      "X": 7.5,
+      "Y": 13,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Warrior3": {
+      "VehicleType": "SimpleFlight",
+      "X": -7.5,
+      "Y": 13,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Warrior4": {
+      "VehicleType": "SimpleFlight",
+      "X": -15,
+      "Y": 0,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Warrior5": {
+      "VehicleType": "SimpleFlight",
+      "X": -7.5,
+      "Y": -13,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Warrior6": {
+      "VehicleType": "SimpleFlight",
+      "X": 7.5,
+      "Y": -13,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 1280,
+              "Height": 720,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+
+    "Kamikaze1": {
+      "VehicleType": "SimpleFlight",
+      "X": 22,
+      "Y": 0,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 640,
+              "Height": 480,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Kamikaze2": {
+      "VehicleType": "SimpleFlight",
+      "X": 11,
+      "Y": 19,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 640,
+              "Height": 480,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Kamikaze3": {
+      "VehicleType": "SimpleFlight",
+      "X": -11,
+      "Y": 19,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 640,
+              "Height": 480,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    },
+    "Kamikaze4": {
+      "VehicleType": "SimpleFlight",
+      "X": -22,
+      "Y": 0,
+      "Z": -2,
+      "Cameras": {
+        "0": {
+          "CaptureSettings": [
+            {
+              "ImageType": 0,
+              "Width": 640,
+              "Height": 480,
+              "FOV_Degrees": 90
+            }
+          ],
+          "X": 0, "Y": 0, "Z": 0,
+          "Pitch": 0, "Roll": 0, "Yaw": 0
+        }
+      }
+    }
+  }
+}

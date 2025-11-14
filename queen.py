@@ -1,9 +1,11 @@
 # queen.py
+# queen.py
 import os
 import time
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
+import sys  # ← ADD THIS LINE
 
 import numpy as np
 import airsim
@@ -21,7 +23,11 @@ logger.setLevel(logging.DEBUG)
 fh = RotatingFileHandler(os.path.join(LOG_DIR, "queen.log"), maxBytes=2_000_000, backupCount=3)
 fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"))
 logger.addHandler(fh)
-ch = logging.StreamHandler()
+
+# ✅ UTF-8 FIX - REPLACE THESE 3 LINES:
+ch = logging.StreamHandler(sys.stdout)
+if hasattr(ch.stream, 'reconfigure'):
+    ch.stream.reconfigure(encoding='utf-8')
 ch.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", "%H:%M:%S"))
 logger.addHandler(ch)
 
@@ -43,7 +49,7 @@ class Queen:
             swarm.log("QUEEN", "Connected to AirSim", "INFO")
         except Exception as e:
             logger.exception("Queen: Cannot connect to AirSim")
-            swarm.log("QUEEN", "❌ QUEEN ERROR: Cannot connect to AirSim!", "WARNING")
+            swarm.log("QUEEN", "QUEEN ERROR: Cannot connect to AirSim!", "WARNING")
             raise Exception("AirSim not running - Start simulation first!") from e
 
         swarm.log("QUEEN", "Initializing - COMMAND CENTER MODE", "INFO")
@@ -52,17 +58,17 @@ class Queen:
         if self.model_loaded:
             return
 
-        swarm.log("QUEEN", "📥 Initializing AI model (may take a moment)...", "INFO")
+        swarm.log("QUEEN", "Initializing AI model (may take a moment)...", "INFO")
         try:
             from ultralytics import YOLO
             self.model = YOLO('yolov8n.pt')
             self.model_loaded = True
-            swarm.log("QUEEN", "✅ AI model ready", "INFO")
+            swarm.log("QUEEN", "AI model ready", "INFO")
             logger.info("YOLO model loaded")
         except Exception as e:
             self.model = None
             self.model_loaded = False
-            swarm.log("QUEEN", f"❌ Model load failed: {e}", "WARNING")
+            swarm.log("QUEEN", f"Model load failed: {e}", "WARNING")
             logger.exception("Failed to load YOLO model")
 
     def get_warrior_camera(self):
@@ -86,8 +92,9 @@ class Queen:
     def detect_threats_from_warrior(self):
         self.ai_scan_count += 1
 
-        if self.ai_scan_count % 30 == 0:
-            swarm.log("QUEEN", f"📡 Monitoring Warrior feed... Scan #{self.ai_scan_count}", "INFO")
+        # More frequent status updates
+        if self.ai_scan_count % 20 == 0:
+            swarm.log("QUEEN", f"AI Monitoring Active... Scan #{self.ai_scan_count}", "INFO")
 
         img, img_w, img_h = self.get_warrior_camera()
         if img is None:
@@ -99,7 +106,7 @@ class Queen:
                 return None
 
         try:
-            results = self.model(img, verbose=False, conf=0.45)
+            results = self.model(img, verbose=False, conf=0.35)  # Lower confidence for more detections
 
             detected = []
             for box in results[0].boxes:
@@ -108,15 +115,19 @@ class Queen:
                 conf = float(box.conf)
                 detected.append(f"{name}:{int(conf*100)}%")
 
-            if detected and self.ai_scan_count % 20 == 0:
-                swarm.log("QUEEN", f"👁️ Warrior sees: {', '.join(detected[:4])}", "INFO")
+            # Log ALL detections more frequently
+            if detected and self.ai_scan_count % 10 == 0:
+                swarm.log("QUEEN", f"Warrior sees: {', '.join(detected[:6])}", "INFO")
 
             # check threat classes
             for box in results[0].boxes:
                 class_id = int(box.cls)
                 conf = float(box.conf)
-                if class_id in self.threat_classes and conf > 0.5:
-                    if time.time() - self.last_threat_time < 8:
+                
+                # Check if it's a threat class
+                if class_id in self.threat_classes and conf > 0.4:  # Lower threshold
+                    # Reduced cooldown for testing
+                    if time.time() - self.last_threat_time < 3:
                         continue
 
                     try:
@@ -144,13 +155,13 @@ class Queen:
 
                     self.last_threat_time = time.time()
                     swarm.log("QUEEN",
-                              f"🚨 WARRIOR SPOTTED: {threat['class']} {int(conf*100)}% at ({world_x:.1f}, {world_y:.1f})",
+                              f"⚠️ THREAT DETECTED: {threat['class']} {int(conf*100)}% at ({world_x:.1f}, {world_y:.1f})",
                               "CRITICAL")
                     return threat
 
-        except Exception:
+        except Exception as e:
             if self.ai_scan_count % 50 == 0:
-                swarm.log("QUEEN", "Detection error", "WARNING")
+                logger.warning(f"Detection error: {e}")
             return None
 
     # -----------------------------------------------------
@@ -162,17 +173,28 @@ class Queen:
         try:
             self.client.enableApiControl(True, "Queen")
             self.client.armDisarm(True, "Queen")
-            self.client.takeoffAsync(vehicle_name="Queen").join()
+            future = self.client.takeoffAsync(vehicle_name="Queen")
+            future.join()
         except:
             pass
 
-        swarm.log("QUEEN", "✈️ Airborne - Command Center", "INFO")
+        swarm.log("QUEEN", "Airborne - Command Center", "INFO")
+        
         try:
-            self.client.moveToPositionAsync(0, 0, -20, 5, vehicle_name="Queen").join()
+            future = self.client.moveToPositionAsync(0, 0, -20, 5, vehicle_name="Queen")
+            future.join()
         except:
             pass
 
-        swarm.log("QUEEN", "📡 Monitoring Warrior camera feed", "WARNING")
+        swarm.log("QUEEN", "👁️ Monitoring Warrior camera feed", "WARNING")
+        
+        # Slow rotation
+        try:
+            self.client.rotateByYawRateAsync(6, 60, vehicle_name="Queen")
+            swarm.log("QUEEN", "Rotating slowly for surveillance", "INFO")
+        except Exception as e:
+            logger.warning(f"Rotation failed: {e}")
+        
         swarm.threat_level = "YELLOW"
 
         scan = 0
@@ -181,56 +203,60 @@ class Queen:
             scan += 1
             swarm.queen_scans = scan
 
-            # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-            # ⭐     FIX: BROADCAST QUEEN POSITION
-            # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
+            # Broadcast Queen position
             try:
                 q = self.client.simGetVehiclePose("Queen").position
                 swarm.last_queen_pos = (q.x_val, q.y_val, q.z_val)
             except:
                 pass
-            # ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
 
-            if scan % 40 == 0:
-                swarm.log("QUEEN", f"Command Center: Scan #{scan}", "INFO")
+            if scan % 30 == 0:  # More frequent updates
+                swarm.log("QUEEN", f"Command Center Active: Scan #{scan}", "INFO")
 
             # Manual threats
             if swarm.active_threat and not swarm.kamikaze_deployed:
                 t = swarm.active_threat
-                swarm.log("QUEEN", f"📍 MANUAL THREAT: {t['class']}", "CRITICAL")
+                swarm.log("QUEEN", f"🎯 MANUAL THREAT: {t['class']}", "CRITICAL")
 
                 approved = swarm.request_permission()
                 if approved:
                     swarm.kamikaze_target = t['world_pos']
                     swarm.kamikaze_deployed = True
+                    swarm.log("QUEEN", "✅ STRIKE AUTHORIZED", "CRITICAL")
                     break
                 else:
                     with swarm.lock:
                         swarm.threats.clear()
                         swarm.active_threat = None
                     swarm.threat_level = "YELLOW"
+                    swarm.log("QUEEN", "❌ STRIKE DENIED", "WARNING")
 
-            # AI threats
+            # AI threats - scan faster
             else:
                 ai_t = self.detect_threats_from_warrior()
                 if ai_t:
                     swarm.add_threat(ai_t)
+                    swarm.log("QUEEN", f"🚨 AI THREAT ADDED TO QUEUE", "CRITICAL")
+                    
                     approved = swarm.request_permission()
                     if approved:
                         swarm.kamikaze_target = ai_t['world_pos']
                         swarm.kamikaze_deployed = True
+                        swarm.log("QUEEN", "✅ AI STRIKE AUTHORIZED", "CRITICAL")
                         break
                     else:
                         with swarm.lock:
                             swarm.threats.clear()
                             swarm.active_threat = None
                         swarm.threat_level = "YELLOW"
+                        swarm.log("QUEEN", "❌ AI STRIKE DENIED", "WARNING")
 
-            time.sleep(1)
+            time.sleep(0.5)  # Faster scanning
 
-        swarm.log("QUEEN", "✅ Mission complete", "INFO")
+        swarm.log("QUEEN", "Mission complete", "INFO")
         try:
-            self.client.hoverAsync(vehicle_name="Queen").join()
+            future = self.client.hoverAsync(vehicle_name="Queen")
+            future.join()
         except:
             pass
 
