@@ -10,6 +10,7 @@ from flask import Flask, Response, render_template_string, jsonify, request
 import airsim
 import numpy as np
 import cv2
+import threading
 
 from swarm_state import swarm
 
@@ -35,7 +36,7 @@ app = Flask(__name__)
 clients = {}
 
 def get_client(drone):
-    """Always return a NEW AirSim client — fixes IOLoop conflict."""
+    """Always return a NEW AirSim client – fixes IOLoop conflict."""
     try:
         client = airsim.MultirotorClient()
         client.confirmConnection()
@@ -131,6 +132,23 @@ def logs():
     except Exception as e:
         logger.exception("Error returning logs")
         return jsonify([])
+    
+@app.route('/queen_ai_vision')
+def queen_ai_vision():
+    """Queen's AI-enhanced view of Warrior feed"""
+    def generate():
+        # Import queen instance (you'll need to make it accessible)
+        from queen import queen_instance  # You'll need to expose this
+        
+        while True:
+            frame = queen_instance.get_annotated_warrior_feed()
+            if frame is not None:
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            time.sleep(0.1)
+    
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/status')
 def status():
@@ -146,7 +164,10 @@ def status():
                 pos = q_client.simGetVehiclePose("Queen").position
                 queen_pose = (pos.x_val, pos.y_val, pos.z_val)
         except Exception:
-            queen_pose = None
+            queen_pose = swarm.last_queen_pos
+
+        # Get learning stats
+        learning_stats = swarm.get_learning_stats()
 
         status_data = {
             'threat_level': swarm.threat_level,
@@ -163,9 +184,9 @@ def status():
             'patrol_relative': swarm.patrol_relative_to_queen,
             'last_patrol_update': getattr(swarm, 'last_patrol_update', 0),
             'last_warrior_update': getattr(swarm, 'last_warrior_update', 0),
-
-            # <<< FIXED LINE >>>
-            'queen_pose': queen_pose
+            'queen_pose': queen_pose,
+            'learning_stats': learning_stats,
+            'mission_count': swarm.mission_count
         }
         status_data = to_serializable(status_data)
         return jsonify(status_data)
@@ -179,7 +200,7 @@ def approve():
     try:
         swarm.user_response = True
         swarm.pending_permission = False
-        swarm.log("USER", "✅ AUTHORIZED", "CRITICAL")
+        swarm.log("USER", "AUTHORIZED", "CRITICAL")
         return jsonify({'status': 'approved'})
     except Exception as e:
         logger.exception("Approve error")
@@ -190,7 +211,7 @@ def deny():
     try:
         swarm.user_response = False
         swarm.pending_permission = False
-        swarm.log("USER", "❌ DENIED", "WARNING")
+        swarm.log("USER", "DENIED", "WARNING")
         return jsonify({'status': 'denied'})
     except Exception as e:
         logger.exception("Deny error")
@@ -242,7 +263,7 @@ def get_patrol():
 
 @app.route('/set_queen_pose', methods=['POST'])
 def set_queen_pose():
-    """Teleport Queen to given pose (x,y,z). Immediate change — useful for testing."""
+    """Teleport Queen to given pose (x,y,z). Immediate change – useful for testing."""
     try:
         data = request.json or {}
         x = float(data.get('x', 0))
@@ -281,12 +302,67 @@ def move_queen():
         logger.exception("Move queen error")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/set_queen_mode', methods=['POST'])
+def set_queen_mode():
+    """Switch between normal and jammer mode"""
+    try:
+        data = request.json or {}
+        mode = data.get('mode', 'normal')
+        if mode not in ['normal', 'jammer']:
+            return jsonify({'error': 'Invalid mode. Use "normal" or "jammer"'}), 400
+        
+        swarm.queen_mode = mode
+        swarm.log("SYSTEM", f"Queen mode changed to: {mode.upper()}", "WARNING")
+        return jsonify({'status': 'ok', 'mode': mode})
+    except Exception as e:
+        logger.exception("Set queen mode error")
+        return jsonify({'error': str(e)}), 500
+
+# Global reference to main's reset function
+reset_mission_handler = None
+
+@app.route('/reset_mission', methods=['POST'])
+def reset_mission():
+    """Reset the swarm for a new mission"""
+    try:
+        if reset_mission_handler is None:
+            # Fallback: Just reset swarm state
+            success = swarm.reset_mission()
+            if success:
+                logger.info("Mission reset (swarm state only)")
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Mission reset (manual AirSim reset required)',
+                    'mission_count': swarm.mission_count
+                })
+        else:
+            # Call main.py's reset function (does everything)
+            logger.info("Calling full mission reset...")
+            
+            # Run reset in background thread so we can return response immediately
+            def do_reset():
+                time.sleep(0.5)  # Small delay
+                reset_mission_handler()
+            
+            reset_thread = threading.Thread(target=do_reset, daemon=True)
+            reset_thread.start()
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Mission reset initiated - Drones resetting...',
+                'mission_count': swarm.mission_count + 1
+            })
+            
+    except Exception as e:
+        logger.exception("Reset mission error")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
 
 # ----------------------------
-# UI Template (full) - same as before but with relative toggle and queen controls
+# UI Template (full) - with AI Learning Dashboard + Restart Button
 # ----------------------------
 UI_TEMPLATE = r"""
 <!doctype html>
@@ -296,7 +372,7 @@ UI_TEMPLATE = r"""
   <title>🚁 AUTONOMOUS DRONE COMMAND CENTER</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
-    :root { --bg:#060606; --accent:#00ff66; --warn:#ff6600; --danger:#ff4444; --muted:#888; --panel:#0f0f0f; }
+    :root { --bg:#060606; --accent:#00ff66; --warn:#ff6600; --danger:#ff4444; --muted:#888; --panel:#0f0f0f; --ai:#00d4ff; }
     html,body{height:100%;margin:0;background:linear-gradient(#040404,#070707);color:var(--accent);font-family: "Consolas","Courier New",monospace;}
     .header{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:2px solid rgba(0,255,102,0.06);}
     h1{margin:0;font-size:1.1rem;color:var(--accent);text-shadow:0 0 8px rgba(0,255,102,0.06);}
@@ -309,24 +385,39 @@ UI_TEMPLATE = r"""
     .feed-label{position:absolute;top:6px;left:8px;background:rgba(0,0,0,0.6);padding:6px 8px;border-radius:4px;font-size:0.8rem;color:var(--warn);border:1px solid rgba(255,102,0,0.12);}
     .panel{background:var(--panel);border:2px solid rgba(0,255,102,0.06);padding:10px;border-radius:8px;color:var(--accent);}
     canvas#mapCanvas{width:100%;height:auto;border-radius:6px;display:block;background:#040404;}
+    .logs{height:260px;overflow:auto;background:#060606;padding:8px;border-radius:6px;border:1px solid rgba}
     .logs{height:260px;overflow:auto;background:#060606;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.02);color:#bfffbf;font-size:0.9rem;}
     .log-entry{font-family:monospace;padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.02);}
     .controls{display:flex;gap:8px;margin-top:8px;}
     input[type=number]{width:120px;padding:6px;background:#000;color:var(--accent);border:1px solid rgba(0,255,102,0.06);border-radius:6px;}
     label{color:#cfe8cf;font-size:0.9rem;}
+    .btn{background:rgba(0,255,102,0.08);color:var(--accent);border:1px solid rgba(0,255,102,0.2);padding:8px 12px;border-radius:6px;cursor:pointer;font-family:monospace;}
+    .btn:hover{background:rgba(0,255,102,0.15);}
     .permission-panel{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#120000;border:3px solid var(--danger);padding:16px;border-radius:8px;z-index:9999;display:none;width:420px;}
     .permission-panel.active{display:block;}
     .permission-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background: rgba(0,0,0,0.6);display:none;z-index:9998;}
     .permission-overlay.active{display:block;}
     .small{font-size:0.85rem;color:var(--muted);}
+    .ai-panel{background:rgba(0,212,255,0.05);border:2px solid rgba(0,212,255,0.15);padding:12px;border-radius:8px;margin-top:12px;}
+    .ai-stat{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed rgba(0,212,255,0.1);}
+    .ai-stat:last-child{border-bottom:none;}
+    .ai-stat-label{color:var(--ai);font-weight:bold;}
+    .ai-stat-value{color:#fff;font-weight:bold;}
+    .mode-toggle{background:rgba(255,102,0,0.08);color:var(--warn);border:1px solid rgba(255,102,0,0.2);padding:8px 12px;border-radius:6px;cursor:pointer;font-family:monospace;margin-top:8px;}
+    .mode-toggle:hover{background:rgba(255,102,0,0.15);}
+    .mode-toggle.jammer{background:rgba(255,68,68,0.15);color:var(--danger);border-color:rgba(255,68,68,0.3);}
+    .reset-btn{background:rgba(255,102,0,0.12);color:var(--warn);border:2px solid rgba(255,102,0,0.3);padding:12px;border-radius:6px;cursor:pointer;font-family:monospace;font-weight:bold;width:100%;margin-top:12px;}
+    .reset-btn:hover{background:rgba(255,102,0,0.2);}
   </style>
 </head>
 <body>
   <div class="header">
     <h1>🚁 AUTONOMOUS DRONE COMMAND CENTER</h1>
     <div style="display:flex;gap:10px;align-items:center;">
+      <div class="stat">Mission #<span id="missionNumber">1</span></div>
       <div class="stat">Scans: <span id="scans">0</span></div>
       <div class="stat">Threat: <span id="threatLevel">GREEN</span></div>
+      <div class="stat" style="background:rgba(0,212,255,0.1);color:var(--ai);">🧠 AI: <span id="aiMode">LEARNING</span></div>
     </div>
   </div>
 
@@ -388,6 +479,37 @@ UI_TEMPLATE = r"""
               <button id="btnQueenSet" class="btn">Teleport Queen</button>
               <button id="btnQueenMove" class="btn">Command Queen to Fly</button>
             </div>
+
+            <div class="ai-panel">
+              <h4 style="margin:0 0 8px 0;color:var(--ai);">🧠 AI Learning Status</h4>
+              <div class="ai-stat">
+                <span class="ai-stat-label">Total Detections:</span>
+                <span class="ai-stat-value" id="totalDetections">0</span>
+              </div>
+              <div class="ai-stat">
+                <span class="ai-stat-label">User Authorized:</span>
+                <span class="ai-stat-value" id="userConfirms">0</span>
+              </div>
+              <div class="ai-stat">
+                <span class="ai-stat-label">User Denied:</span>
+                <span class="ai-stat-value" id="userDenials">0</span>
+              </div>
+              <div class="ai-stat">
+                <span class="ai-stat-label">Auto Decisions:</span>
+                <span class="ai-stat-value" id="autoDecisions">0</span>
+              </div>
+              <div class="ai-stat">
+                <span class="ai-stat-label">Model Confidence:</span>
+                <span class="ai-stat-value" id="modelConf">0%</span>
+              </div>
+              <div class="small" style="margin-top:8px;color:var(--ai);">
+                ✨ System learns from each authorization decision
+              </div>
+              
+              <button id="btnToggleMode" class="mode-toggle">
+                🔄 Switch to JAMMER MODE (Autonomous)
+              </button>
+            </div>
           </div>
 
           <div>
@@ -409,7 +531,7 @@ UI_TEMPLATE = r"""
         <h3>Manual Threat Spawner</h3>
         <div>
           <label>Type</label><br>
-          <select id="threatType" style="width:100%; padding:6px; border-radius:6px; margin-bottom:6px;">
+          <select id="threatType" style="width:100%; padding:6px; border-radius:6px; margin-bottom:6px;background:#000;color:var(--accent);border:1px solid rgba(0,255,102,0.06);">
             <option value="person">👤 Person</option>
             <option value="car">🚗 Car</option>
             <option value="bus">🚌 Bus</option>
@@ -430,9 +552,24 @@ UI_TEMPLATE = r"""
           <button id="btnDeny" class="btn" style="background:rgba(255,0,0,0.06);color:var(--danger);">❌ DENY</button>
         </div>
 
+        <div style="margin-top:20px; padding-top:20px; border-top:2px solid rgba(0,255,102,0.1);">
+          <h4 style="margin:6px 0 8px 0; color:var(--warn);">🎮 Mission Control</h4>
+          <button id="btnResetMission" class="reset-btn">
+            🔄 RESTART MISSION
+          </button>
+          <div class="small" style="margin-top:8px; color:var(--warn);">
+            Resets mission state while preserving AI learning data
+          </div>
+        </div>
+
         <div style="margin-top:12px;">
           <h4 style="margin:6px 0 4px 0;">System Info</h4>
-          <div class="small">Datacenter logs saved to <code>/logs/datacenter.log</code></div>
+          <div class="small">Queen Mode: <span id="currentMode" style="font-weight:bold;color:var(--accent);">NORMAL</span></div>
+          <div class="small">Mission Status: <span id="missionStatus" style="font-weight:bold;color:var(--accent);">ACTIVE</span></div>
+          <div class="small">Datacenter logs: <code>/logs/datacenter.log</code></div>
+          <div class="small" style="margin-top:6px;color:var(--ai);">
+            💡 In JAMMER MODE, AI makes autonomous decisions based on learned patterns
+          </div>
         </div>
       </div>
     </div>
@@ -467,6 +604,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const ctx = map.getContext('2d');
 
   let buttonsDisabled = false;
+  let currentQueenMode = 'normal';
 
   function clearMap(){ ctx.fillStyle = "#040404"; ctx.fillRect(0,0,map.width,map.height); }
 
@@ -477,17 +615,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const pxPerMeter = (Math.min(map.width, map.height) * 0.35) / Math.max(1, r);
     const centerScreen = {x: map.width/2, y: map.height/2};
 
-    // patrol circle
     ctx.beginPath();
     ctx.strokeStyle = "#ff6600";
     ctx.lineWidth = 2;
     ctx.arc(centerScreen.x, centerScreen.y, r*pxPerMeter, 0, Math.PI*2);
     ctx.stroke();
-    // center marker
     ctx.fillStyle = "#ff6600";
     ctx.fillRect(centerScreen.x-5, centerScreen.y-5, 10, 10);
 
-    // warrior position
     if(warriorStatus && warriorStatus.position){
       const pos = warriorStatus.position;
       const wx = pos[0] - cx;
@@ -502,7 +637,6 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.stroke();
     }
 
-    // Queen marker
     if (queenPos && queenPos.length>=2 && !isNaN(queenPos[0])) {
       const qx = queenPos[0] - cx;
       const qy = queenPos[1] - cy;
@@ -526,18 +660,16 @@ document.addEventListener('DOMContentLoaded', () => {
     logsDiv.scrollTop = logsDiv.scrollHeight;
   }
 
-  // Show/hide permission modal
   function showPermission(threat) {
     if (!threat) threat = {class:'unknown', world_pos:[0,0]};
     threatInfo.innerHTML = `
       <div><strong>Threat:</strong> ${threat.class || 'unknown'}</div>
       <div><strong>Confidence:</strong> ${threat.confidence ? (Math.round(threat.confidence*100) + '%') : '—'}</div>
       <div><strong>Coords:</strong> ${threat.world_pos ? `${threat.world_pos[0].toFixed(1)}, ${threat.world_pos[1].toFixed(1)}` : '—'}</div>
-      <div style="margin-top:8px;" class="small">You have the option to Authorize (strike) or Deny. If you do nothing, the system will auto-authorize after timeout.</div>
+      <div style="margin-top:8px;" class="small">Authorize to strike or Deny. The system learns from your decision.</div>
     `;
     overlay.classList.add('active');
     panel.classList.add('active');
-    // enable buttons
     document.getElementById('panelApprove').disabled = false;
     document.getElementById('panelDeny').disabled = false;
     buttonsDisabled = false;
@@ -550,7 +682,6 @@ document.addEventListener('DOMContentLoaded', () => {
     buttonsDisabled = false;
   }
 
-  // Approve / Deny with disable-once-click to avoid duplicate requests
   function approve() {
     if (buttonsDisabled) return;
     buttonsDisabled = true;
@@ -561,6 +692,7 @@ document.addEventListener('DOMContentLoaded', () => {
         hidePermission();
       }).catch(e => { console.error(e); hidePermission(); });
   }
+  
   function deny() {
     if (buttonsDisabled) return;
     buttonsDisabled = true;
@@ -575,7 +707,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('panelApprove').addEventListener('click', approve);
   document.getElementById('panelDeny').addEventListener('click', deny);
 
-  // UI handlers (patrol, spawn, queen)
   function spawnThreatUI() {
     const type = document.getElementById('threatType').value;
     const x = parseFloat(document.getElementById('threatX').value);
@@ -605,7 +736,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btnUpdate').addEventListener('click', updatePatrolUI);
   document.getElementById('btnSpawn').addEventListener('click', spawnThreatUI);
 
-  // Queen controls
   document.getElementById('btnQueenSet').addEventListener('click', () => {
     const x = parseFloat(queenX.value); const y = parseFloat(queenY.value); const z = parseFloat(queenZ.value);
     fetch('/set_queen_pose', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({x,y,z}) })
@@ -620,7 +750,71 @@ document.addEventListener('DOMContentLoaded', () => {
       .catch(e => { console.error(e); alert('Failed to move queen'); });
   });
 
-  // Main polling - get status + logs and show permission modal when pending
+  document.getElementById('btnToggleMode').addEventListener('click', () => {
+    const newMode = currentQueenMode === 'normal' ? 'jammer' : 'normal';
+    fetch('/set_queen_mode', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode: newMode})
+    }).then(r => r.json()).then(d => {
+      if (d.error) {
+        alert('Error: ' + d.error);
+      } else {
+        currentQueenMode = newMode;
+        updateModeUI();
+        alert(`Queen mode changed to: ${newMode.toUpperCase()}`);
+      }
+    }).catch(e => { console.error(e); alert('Failed to toggle mode'); });
+  });
+
+  document.getElementById('btnResetMission').addEventListener('click', () => {
+    if (!confirm('Reset mission and start fresh?\n\nThis will:\n• Clear current threats\n• Reset kamikaze deployment\n• Keep AI learning data\n• Keep patrol settings\n\nContinue?')) {
+      return;
+    }
+
+    fetch('/reset_mission', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'}
+    }).then(r => r.json()).then(d => {
+      if (d.error) {
+        alert('Reset failed: ' + d.error);
+      } else {
+        document.getElementById('missionStatus').textContent = 'ACTIVE';
+        document.getElementById('missionStatus').style.color = 'var(--accent)';
+        document.getElementById('missionNumber').textContent = d.mission_count || 1;
+        
+        alert('✅ Mission Reset Complete!\n\nSystem ready for new operation.\nMission #' + (d.mission_count || 1));
+        
+        setTimeout(updateStatus, 500);
+      }
+    }).catch(e => {
+      console.error(e);
+      alert('Reset request failed: ' + e);
+    });
+  });
+
+  function updateModeUI() {
+    const btn = document.getElementById('btnToggleMode');
+    const modeDisplay = document.getElementById('currentMode');
+    const aiModeDisplay = document.getElementById('aiMode');
+    
+    if (currentQueenMode === 'jammer') {
+      btn.textContent = '🔄 Switch to NORMAL MODE';
+      btn.classList.add('jammer');
+      modeDisplay.textContent = 'JAMMER (Autonomous)';
+      modeDisplay.style.color = 'var(--danger)';
+      aiModeDisplay.textContent = 'AUTONOMOUS';
+      aiModeDisplay.parentElement.style.background = 'rgba(255,68,68,0.15)';
+    } else {
+      btn.textContent = '🔄 Switch to JAMMER MODE (Autonomous)';
+      btn.classList.remove('jammer');
+      modeDisplay.textContent = 'NORMAL';
+      modeDisplay.style.color = 'var(--accent)';
+      aiModeDisplay.textContent = 'LEARNING';
+      aiModeDisplay.parentElement.style.background = 'rgba(0,212,255,0.1)';
+    }
+  }
+
   async function updateStatus() {
     try {
       const res = await fetch('/status');
@@ -632,7 +826,7 @@ document.addEventListener('DOMContentLoaded', () => {
       document.getElementById('patrolCenter').textContent = `${status.patrol_area.center_x.toFixed(1)}, ${status.patrol_area.center_y.toFixed(1)}`;
       document.getElementById('patrolRadius').textContent = `${status.patrol_area.radius.toFixed(1)}`;
       document.getElementById('patrolMode').textContent = status.patrol_relative ? 'RELATIVE' : 'ABSOLUTE';
-      // Only update UI controls if the user is NOT actively editing them
+      
       if (document.activeElement !== centerXInput) {
         centerXInput.value = Number(status.patrol_area.center_x).toFixed(1);
       }
@@ -642,11 +836,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (document.activeElement !== radiusInput) {
         radiusInput.value = Number(status.patrol_area.radius).toFixed(1);
       }
-      // For checkbox, avoid overwriting if user just clicked it (it may get focus)
       if (document.activeElement !== relativeToggle) {
         relativeToggle.checked = Boolean(status.patrol_relative);
       }
-
 
       if (status.warrior_status && status.warrior_status.position) {
         const p = status.warrior_status.position;
@@ -656,20 +848,35 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('warriorPos').textContent = '—';
       }
 
-      // render logs
+      if (status.learning_stats) {
+        document.getElementById('totalDetections').textContent = status.learning_stats.total_detections || 0;
+        document.getElementById('userConfirms').textContent = status.learning_stats.user_confirmations || 0;
+        document.getElementById('userDenials').textContent = status.learning_stats.user_denials || 0;
+        document.getElementById('autoDecisions').textContent = status.learning_stats.auto_decisions || 0;
+        const conf = status.learning_stats.model_confidence || 0;
+        document.getElementById('modelConf').textContent = Math.round(conf * 100) + '%';
+      }
+
+      document.getElementById('missionNumber').textContent = status.mission_count || 1;
+
+      const missionStatusEl = document.getElementById('missionStatus');
+      if (status.kamikaze_deployed) {
+        missionStatusEl.textContent = 'COMPLETE';
+        missionStatusEl.style.color = 'var(--warn)';
+      } else {
+        missionStatusEl.textContent = 'ACTIVE';
+        missionStatusEl.style.color = 'var(--accent)';
+      }
+
       const logsRes = await fetch('/logs');
       const logs = await logsRes.json();
       renderLogs(logs || []);
-      // draw map (no queen pose exposed yet)
+      
       drawMap(status.patrol_area, status.warrior_status || null, status.queen_pose);
 
-
-      // permission modal handling
       if (status.pending_permission) {
-        // show modal with threat info
         showPermission(status.active_threat);
       } else {
-        // hide if not pending
         hidePermission();
       }
     } catch (e) {
@@ -690,9 +897,8 @@ document.addEventListener('DOMContentLoaded', () => {
 def index():
     return render_template_string(UI_TEMPLATE)
 
-# run helper for in-thread launching
 def run_web(host='0.0.0.0', port=5000):
-    """Run Flask app — use_reloader=False so it can be started in-thread safely."""
+    """Run Flask app"""
     try:
         logger.info(f"Starting datacenter web UI on {host}:{port}")
         app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)

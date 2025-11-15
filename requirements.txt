@@ -1,0 +1,10 @@
+scikit-learn 
+pandas 
+joblib
+os
+flask
+ultralytics
+numpy
+opencv-python
+airsim
+keyboard

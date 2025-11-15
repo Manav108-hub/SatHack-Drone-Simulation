@@ -63,7 +63,7 @@ class SwarmState:
         self.lock = Lock()
         self.threats = []
         self.active_threat = None
-        self.queen_mode = "normal"
+        self.queen_mode = "normal"  # "normal" or "jammer"
         self.kamikaze_deployed = False
         self.kamikaze_target = None
         
@@ -85,6 +85,20 @@ class SwarmState:
         self.last_warrior_pos = (None, None, None)
         self.last_warrior_update = 0.0
         self.last_patrol_update = 0.0
+        self.last_queen_pos = (0, 0, -20)  # Default queen position
+
+        # Learning statistics
+        self.learning_stats = {
+            'total_detections': 0,
+            'user_confirmations': 0,
+            'user_denials': 0,
+            'auto_decisions': 0,
+            'model_confidence': 0.0,
+            'learning_enabled': True
+        }
+
+        # Mission counter
+        self.mission_count = 0
 
         # Persist file
         self.persist_file = os.path.join(LOG_DIR, "swarm_persist.json")
@@ -105,6 +119,14 @@ class SwarmState:
                         self.patrol_center_y = data.get("patrol_center_y", self.patrol_center_y)
                         self.patrol_radius = data.get("patrol_radius", self.patrol_radius)
                         self.patrol_relative_to_queen = data.get("patrol_relative_to_queen", self.patrol_relative_to_queen)
+                        
+                        # Load learning stats if available
+                        if "learning_stats" in data:
+                            self.learning_stats.update(data["learning_stats"])
+                        
+                        # Load mission count
+                        self.mission_count = data.get("mission_count", 0)
+                        
                         logger.info("Loaded persisted state.")
         except Exception as e:
             logger.warning(f"Failed to load persisted swarm state: {e}")
@@ -117,7 +139,9 @@ class SwarmState:
                     "patrol_center_x": self.patrol_center_x,
                     "patrol_center_y": self.patrol_center_y,
                     "patrol_radius": self.patrol_radius,
-                    "patrol_relative_to_queen": self.patrol_relative_to_queen
+                    "patrol_relative_to_queen": self.patrol_relative_to_queen,
+                    "learning_stats": self.learning_stats,
+                    "mission_count": self.mission_count
                 }
             with open(self.persist_file, "w") as f:
                 json.dump(data, f, indent=2)
@@ -167,7 +191,7 @@ class SwarmState:
             self.threat_level = "RED"
 
         self.log("QUEEN", 
-                 f"🚨 THREAT: {threat_data['class']} at "
+                 f"THREAT: {threat_data['class']} at "
                  f"({threat_data['world_pos'][0]:.1f}, {threat_data['world_pos'][1]:.1f})",
                  "CRITICAL")
 
@@ -190,16 +214,57 @@ class SwarmState:
             self.log("WARRIOR", f"Pos: ({position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f})", "INFO")
 
     # -------------------------------------------------------
+    # Learning statistics tracking
+    # -------------------------------------------------------
+    def update_learning_stats(self, confirmed, auto_mode=False, confidence=0.0):
+        """
+        Update learning statistics after each threat decision.
+        
+        Args:
+            confirmed: True if threat was confirmed/authorized
+            auto_mode: True if decision was made autonomously
+            confidence: Model confidence score (0.0-1.0)
+        """
+        with self.lock:
+            self.learning_stats['total_detections'] += 1
+            
+            if confirmed:
+                self.learning_stats['user_confirmations'] += 1
+            else:
+                self.learning_stats['user_denials'] += 1
+            
+            if auto_mode:
+                self.learning_stats['auto_decisions'] += 1
+            
+            # Update running average confidence
+            if confidence > 0:
+                current_conf = self.learning_stats['model_confidence']
+                total = self.learning_stats['total_detections']
+                # Running average
+                self.learning_stats['model_confidence'] = (
+                    (current_conf * (total - 1) + confidence) / total
+                )
+        
+        # Persist stats periodically
+        if self.learning_stats['total_detections'] % 5 == 0:
+            self._persist()
+
+    def get_learning_stats(self):
+        """Get current learning statistics (thread-safe)"""
+        with self.lock:
+            return dict(self.learning_stats)
+
+    # -------------------------------------------------------
     # Permission request (15s countdown)
     # -------------------------------------------------------
     def request_permission(self):
 
         # --- REAL AUTH LOGIC STARTS HERE ---
         if self.queen_mode == "jammer":
-            self.log("SYSTEM", "⚡ JAMMER MODE - AUTO-AUTH", "WARNING")
+            self.log("SYSTEM", "JAMMER MODE - AUTO-AUTH", "WARNING")
             return True
 
-        self.log("QUEEN", "📞 REQUESTING AUTHORIZATION", "WARNING")
+        self.log("QUEEN", "REQUESTING AUTHORIZATION", "WARNING")
 
         if self.active_threat:
             self.log("QUEEN",
@@ -221,21 +286,17 @@ class SwarmState:
                 self.user_response = None
 
                 if approved:
-                    self.log("USER", "✅ AUTHORIZED", "CRITICAL")
+                    self.log("USER", "AUTHORIZED", "CRITICAL")
                     return True
                 else:
-                    self.log("USER", "❌ DENIED", "WARNING")
+                    self.log("USER", "DENIED", "WARNING")
                     return False
 
             time.sleep(0.2)
 
-        self.log("SYSTEM", "⏱️ TIMEOUT - AUTO-AUTH", "WARNING")
+        self.log("SYSTEM", "TIMEOUT - AUTO-AUTH", "WARNING")
         self.pending_permission = False
         return True
-
-
-        # --- Real logic kept below for future use ----
-        # ...
 
     # -------------------------------------------------------
     # Getters
@@ -260,7 +321,7 @@ class SwarmState:
             self.last_patrol_update = time.time()
 
         mode = "RELATIVE_TO_QUEEN" if relative else "ABSOLUTE"
-        self.log("SYSTEM", f"📡 Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m MODE={mode}", "WARNING")
+        self.log("SYSTEM", f"Patrol updated: ({cx:.0f}, {cy:.0f}) R={radius:.0f}m MODE={mode}", "WARNING")
         self._persist()
 
     def get_patrol_area(self):
@@ -276,6 +337,44 @@ class SwarmState:
             return (queen_pose[0] + cx, queen_pose[1] + cy, r)
 
         return (cx, cy, r)
+
+    # -------------------------------------------------------
+    # Reset for new mission
+    # -------------------------------------------------------
+    def reset_mission(self):
+        """
+        Reset swarm state for a new mission.
+        Keeps learning data but clears mission-specific state.
+        """
+        with self.lock:
+            # Clear threats
+            self.threats.clear()
+            self.active_threat = None
+            
+            # Reset deployment flags
+            self.kamikaze_deployed = False
+            self.kamikaze_target = None
+            
+            # Reset threat level
+            self.threat_level = "GREEN"
+            
+            # Reset permission state
+            self.pending_permission = False
+            self.user_response = None
+            
+            # Reset scan counter
+            self.queen_scans = 0
+            
+            # Increment mission counter
+            self.mission_count += 1
+            
+            # Keep learning stats (don't reset)
+            # Keep patrol settings (don't reset)
+            # Keep mission logs (don't reset)
+            
+        self.log("SYSTEM", f"Mission #{self.mission_count} - Ready for new operation", "WARNING")
+        self._persist()
+        return True
 
 
 # SINGLE INSTANCE
